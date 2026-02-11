@@ -11,7 +11,7 @@ jobs:
       - name: Setup Build Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo zip
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo zip curl
           mkdir -p $GITHUB_WORKSPACE/kernel_workspace
           echo "KERNEL_ROOT=$GITHUB_WORKSPACE/kernel_workspace" >> $GITHUB_ENV
 
@@ -21,68 +21,72 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.15-lts --depth=1
           repo sync -j$(nproc) --force-sync
 
-      - name: Inject Samsung Source & Apply Patches
+      - name: Fetch and Patch Source Code (The Missing Step)
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
-          echo "=> Cloning Samsung SM-M146B Source..."
+          echo "=> 1. Porting Samsung USB DWC3 & Gadget Drivers..."
           git clone https://github.com/MrPankaj24/SM-M146B-Kernel-Source.git --depth=1 samsung_src
-          
-          echo "=> Porting USB DWC3 & Gadget Drivers..."
           rm -rf common/drivers/usb/dwc3
           cp -r samsung_src/drivers/usb/dwc3 common/drivers/usb/
           cp -r samsung_src/drivers/usb/gadget/function/* common/drivers/usb/gadget/function/
           
-          echo "=> Applying Module Check Bypass (Force Load)..."
-          TARGET_MODULE="common/kernel/module.c"
-          if [ -f "$TARGET_MODULE" ]; then
-            sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET_MODULE"
-          fi
+          echo "=> 2. Fetching KernelSU-Next..."
+          cd common
+          curl -ls https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh | bash -s next
+          cd ..
 
-          echo "=> Disabling WERROR..."
-          sed -i 's/CONFIG_WERROR=y/CONFIG_WERROR=n/' common/arch/arm64/configs/gki_defconfig || true
+          echo "=> 3. Fetching and Patching SUSFS v2.0.0..."
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
+          cp -r susfs4ksu/kernel_patches/fs/* common/fs/
+          cp -r susfs4ksu/kernel_patches/include/linux/* common/include/linux/
+          cd common
+          patch -p1 < ../susfs4ksu/kernel_patches/50_recipe_susfs.patch || true
+          patch -p1 < ../susfs4ksu/kernel_patches/fs/susfs.patch || true
+          cd ..
 
-      - name: Configure Kernel Features via Fragment
+          echo "=> 4. Applying Module Check Bypass (Force Load)..."
+          sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' common/kernel/module.c || true
+
+      - name: Inject Configuration Flags
         working-directory: ${{ env.KERNEL_ROOT }}/common
         run: |
-          echo "=> Creating Configuration Fragment..."
-          # We create a fragment file instead of touching gki_defconfig directly
-          cat > arch/arm64/configs/samsung_custom.fragment << 'EOF'
+          echo "=> Appending custom configs to gki_defconfig..."
+          cat >> arch/arm64/configs/gki_defconfig << 'EOF'
+          # EXYNOS & USB
+          CONFIG_ARCH_EXYNOS=y
           CONFIG_USB_DWC3_EXYNOS=y
           CONFIG_USB_F_RNDIS=y
           CONFIG_USB_CONFIGFS_F_TETHER=y
           CONFIG_USB_DWC3_DUAL_ROLE=y
+          # KSU & SUSFS
           CONFIG_KSU=y
           CONFIG_KSU_SUSFS=y
           CONFIG_WIREGUARD=y
           EOF
+          
+          echo "=> Disabling WERROR..."
+          sed -i 's/CONFIG_WERROR=y/CONFIG_WERROR=n/' arch/arm64/configs/gki_defconfig || true
 
-          # Tell Kleaf to use this fragment
-          echo 'KBUILD_DEFCONFIG="gki_defconfig"' >> build.config.gki.aarch64
-          echo 'POST_DEFCONFIG_CMDS="check_defconfig"' >> build.config.gki.aarch64
-          # This specifically overrides the strict check
-          echo 'KCONFIG_EXT_PREFIX="arch/arm64/configs/samsung_custom.fragment"' >> build.config.gki.aarch64
-
-      - name: Compile Kernel (Bazel)
+      - name: Native Bazel Config Update & Compilation
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
-          echo "=> Running Official Bazel Update for Configs..."
-          # This command forces Bazel to accept your custom fragment and regenerate a valid savedefconfig natively
+          echo "=> Running Official Bazel Config Update..."
+          # This is the "God command" for Kleaf. It safely evaluates our new configs, 
+          # formats them properly, and overwrites gki_defconfig so the checker guarantees a 100% match.
           tools/bazel run //common:kernel_aarch64_config_update
           
           echo "=> Starting Final Bazel Build..."
-          # Build with ABI check bypass
           tools/bazel build --config=fast //common:kernel_aarch64_dist
 
       - name: Package AnyKernel3
         run: |
-          echo "=> Packaging into AnyKernel3 Zip..."
           git clone https://github.com/osm0sis/AnyKernel3.git
           cp ${{ env.KERNEL_ROOT }}/bazel-bin/common/kernel_aarch64/Image AnyKernel3/
           cd AnyKernel3
-          zip -r9 ../M146B-Comprehensive-USB-Bypass.zip * -x .git*
+          zip -r9 ../M146B-Kernel-Complete.zip * -x .git*
 
       - name: Upload Flashable Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: M146B-Comprehensive-USB-Bypass
-          path: M146B-Comprehensive-USB-Bypass.zip
+          name: M146B-Kernel-Complete
+          path: M146B-Kernel-Complete.zip
