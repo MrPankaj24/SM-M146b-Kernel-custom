@@ -17,7 +17,7 @@ jobs:
       - name: Setup Build Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo zip
           mkdir -p $GITHUB_WORKSPACE/kernel_workspace
           echo "KERNEL_ROOT=$GITHUB_WORKSPACE/kernel_workspace" >> $GITHUB_ENV
 
@@ -44,8 +44,7 @@ jobs:
             sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET_FILE"
           fi
           
-          # 4. Bypass savedefconfig Integrity Error
-          # This removes the check that failed in your previous log
+          # 4. Bypass savedefconfig Integrity Error (Critical Fix)
           sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"//' ${{ env.KERNEL_ROOT }}/common/build.config.gki.aarch64 || true
           
           # 5. Disable Werror (Avoid failing on minor driver warnings)
@@ -71,8 +70,15 @@ jobs:
           # Use --config=fast to bypass strict KMI ABI checks
           tools/bazel build --config=fast //common:kernel_aarch64_dist
 
-      - name: Upload Artifacts
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git
+          cp ${{ env.KERNEL_ROOT }}/bazel-bin/common/kernel_aarch64/Image AnyKernel3/
+          cd AnyKernel3
+          zip -r9 ../M146B-LTS-USB-Fixed.zip * -x .git*
+
+      - name: Upload Flashable Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: M146B-Bypass-USB-Fixed
-          path: ${{ env.KERNEL_ROOT }}/bazel-bin/common/kernel_aarch64/Image
+          name: M146B-Bypass-USB-Flashable
+          path: M146B-LTS-USB-Fixed.zip
