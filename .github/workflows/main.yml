@@ -33,11 +33,14 @@ jobs:
           cp -r samsung_src/drivers/usb/gadget/function/* common/drivers/usb/gadget/function/
           cp -r samsung_src/drivers/usb/host/* common/drivers/usb/host/ || true
           
+          echo "=> FORCING Exynos Audio Compilation..."
+          # This edits the host Makefile to guarantee the audio file is compiled with the rest of the xhci drivers
+          sed -i 's/xhci-plat-y := xhci-plat.o/xhci-plat-y := xhci-plat.o xhci-exynos-audio.o/' common/drivers/usb/host/Makefile || true
+          
           echo "=> Applying Module Check Bypass (Force Load)..."
           sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' common/kernel/module.c || true
 
           echo "=> Obliterating strict defconfig checks..."
-          # This sweeps through all GKI config files and deletes the check_defconfig command
           find common -name "build.config.*" -exec sed -i 's/check_defconfig//g' {} +
           find common -name "build.config.*" -exec sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/g' {} +
 
@@ -46,7 +49,6 @@ jobs:
         run: |
           echo "=> Fetching KernelSU-Next..."
           cd common
-          # Falling back to default script behavior to avoid pathspec errors
           curl -ls https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh | bash - || true
           cd ..
           
@@ -56,7 +58,6 @@ jobs:
             cp -r susfs4ksu/kernel_patches/fs/* common/fs/ || true
             cp -r susfs4ksu/kernel_patches/include/linux/* common/include/linux/ || true
             cd common
-            # Safely apply any patch files found in the directory
             for patch in ../susfs4ksu/kernel_patches/*.patch; do
               patch -p1 < "$patch" || true
             done
@@ -75,8 +76,6 @@ jobs:
           CONFIG_USB_F_RNDIS=y
           CONFIG_USB_CONFIGFS_F_TETHER=y
           CONFIG_USB_DWC3_DUAL_ROLE=y
-          
-          # ---> THIS IS THE FIX FOR THE MISSING AUDIO FUNCTION <---
           CONFIG_USB_XHCI_EXYNOS=y
           
           # --- KSU & SUSFS ---
@@ -92,7 +91,6 @@ jobs:
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |          
           echo "=> Starting Final Bazel Build..."
-          # With the checkers destroyed, this will run straight through using your custom configs
           tools/bazel build --config=fast //common:kernel_aarch64_dist
 
       - name: Package AnyKernel3
