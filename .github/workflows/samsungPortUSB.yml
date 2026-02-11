@@ -61,8 +61,8 @@ jobs:
       - name: Build Kernel (Bazel)
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
-          # Pass the fragment to the build tool properly
-          tools/bazel build --config=fast //common:kernel_aarch64_dist -- --defconfig_fragment=arch/arm64/configs/samsung_usb.fragment
+          # The quotes around "--defconfig_fragment=..." are the fix for the previous error
+          tools/bazel build --config=fast //common:kernel_aarch64_dist -- "--defconfig_fragment=arch/arm64/configs/samsung_usb.fragment"
 
       - name: Package with AnyKernel3
         run: |
