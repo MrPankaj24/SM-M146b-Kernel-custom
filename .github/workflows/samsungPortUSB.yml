@@ -1,4 +1,4 @@
-- name: Initialize and Sync Kernel Source
+- name: Initialize and Sync Kernel Source by Pankaj
       working-directory: ${{ env.KERNEL_ROOT }}
       run: |
         FORMATTED_BRANCH="android13-5.15-lts"
