@@ -50,12 +50,19 @@ jobs:
           cat temp.h common/drivers/usb/host/xhci-mem.c > temp.c && mv temp.c common/drivers/usb/host/xhci-mem.c
           
           # Fix 4: xhci-hub.c incomplete type 'struct xhci_exynos_audio'
-          # Step A: Unlock the header file by removing guards (Already doing this, but repeating to be safe)
-          sed -i 's/#ifdef CONFIG_USB_XHCI_EXYNOS/#if 1/g' common/drivers/usb/host/xhci-exynos-audio.h || true
-          sed -i 's/#ifdef CONFIG_USB_XHCI_EXYNOS_AUDIO/#if 1/g' common/drivers/usb/host/xhci-exynos-audio.h || true
+          # STRATEGY: Directly inject the struct definition into the C file to bypass header issues
+          cat > struct_audio_patch.txt << 'EOF'
+          struct xhci_exynos_audio {
+              struct device *dev;
+              struct phy *phy;
+              void __iomem *regs;
+          };
+          EOF
+          # We prepend this struct definition to the top of xhci-hub.c
+          cat struct_audio_patch.txt common/drivers/usb/host/xhci-hub.c > temp_hub.c && mv temp_hub.c common/drivers/usb/host/xhci-hub.c
           
-          # Step B: Force include the header into xhci-hub.c (This is the NEW FIX)
-          sed -i '1s/^/#include "xhci-exynos-audio.h"\n/' common/drivers/usb/host/xhci-hub.c
+          # We also need to define the global variable
+          sed -i '1s/^/extern struct xhci_exynos_audio *g_xhci_exynos_audio;\n/' common/drivers/usb/host/xhci-hub.c
           
           echo "=> BRUTE FORCE FIX: Forcing Audio Compilation..."
           echo "obj-y += xhci-exynos-audio.o" >> common/drivers/usb/host/Makefile
