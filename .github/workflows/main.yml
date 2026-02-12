@@ -33,21 +33,28 @@ jobs:
           cp -r samsung_src/drivers/usb/gadget/function/* common/drivers/usb/gadget/function/
           cp -r samsung_src/drivers/usb/host/* common/drivers/usb/host/ || true
           
-          echo "=> BRUTE FORCE FIX: Injecting Audio Declarations..."
+          echo "=> BRUTE FORCE FIXES (The Accumulation)..."
+          
           # Fix 1: core.c missing xhci_exynos_audio_alloc
           sed -i '1s/^/struct device;\nextern int xhci_exynos_audio_alloc(struct device *dev);\n/' common/drivers/usb/dwc3/core.c
+          
           # Fix 2: xhci.c missing xhci_exynos_sync_dev_ctx
           sed -i '1s/^/struct xhci_hcd;\nextern int xhci_exynos_sync_dev_ctx(struct xhci_hcd *xhci, int slot_id);\n/' common/drivers/usb/host/xhci.c
           
-          echo "=> BRUTE FORCE FIX: Extracting & Forcing URAM Audio Macro..."
           # Fix 3: xhci-mem.c missing XHCI_USE_URAM_FOR_EXYNOS_AUDIO
-          # We extract the exact definition from Samsung's header and glue it to the top of the C file
           URAM_DEF=$(grep -h "define XHCI_USE_URAM_FOR_EXYNOS_AUDIO" common/drivers/usb/host/xhci.h | head -n 1)
           if [ -z "$URAM_DEF" ]; then URAM_DEF="#define XHCI_USE_URAM_FOR_EXYNOS_AUDIO 0"; fi
           echo "#ifndef XHCI_USE_URAM_FOR_EXYNOS_AUDIO" > temp.h
           echo "$URAM_DEF" >> temp.h
           echo "#endif" >> temp.h
           cat temp.h common/drivers/usb/host/xhci-mem.c > temp.c && mv temp.c common/drivers/usb/host/xhci-mem.c
+          
+          # Fix 4: xhci-hub.c incomplete type 'struct xhci_exynos_audio'
+          # Step A: Unlock the header file by removing guards
+          sed -i 's/#ifdef CONFIG_USB_XHCI_EXYNOS/#if 1/g' common/drivers/usb/host/xhci-exynos-audio.h || true
+          sed -i 's/#ifdef CONFIG_USB_XHCI_EXYNOS_AUDIO/#if 1/g' common/drivers/usb/host/xhci-exynos-audio.h || true
+          # Step B: Force include the header into xhci-hub.c
+          sed -i '1s/^/#include "xhci-exynos-audio.h"\n/' common/drivers/usb/host/xhci-hub.c
           
           echo "=> BRUTE FORCE FIX: Forcing Audio Compilation..."
           echo "obj-y += xhci-exynos-audio.o" >> common/drivers/usb/host/Makefile
