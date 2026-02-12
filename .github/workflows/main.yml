@@ -44,6 +44,7 @@ jobs:
           echo "=> RUNNING PYTHON SURGEON..."
           cat <<EOF > patcher.py
           import os
+          import re
 
           # Fix 1: core.c missing xhci_exynos_audio_alloc
           core_c = 'common/drivers/usb/dwc3/core.c'
@@ -82,6 +83,22 @@ jobs:
                   lines.insert(0, macro_def)
                   with open(mem_c, 'w') as f: f.writelines(lines)
                   print("Patched xhci-mem.c")
+
+          # Fix 5: u_ether.c unused function error (REGEX EDITION)
+          ether_c = 'common/drivers/usb/gadget/function/u_ether.c'
+          if os.path.exists(ether_c):
+              with open(ether_c, 'r') as f: content = f.read()
+              # Regex to find the function signature regardless of spacing
+              pattern = r'static\s+enum\s+hrtimer_restart\s+tx_timeout\s*\(\s*struct\s+hrtimer\s*\*\s*data\s*\)'
+              replacement = 'static enum hrtimer_restart __maybe_unused tx_timeout(struct hrtimer *data)'
+              
+              new_content = re.sub(pattern, replacement, content)
+              
+              if new_content != content:
+                  with open(ether_c, 'w') as f: f.write(new_content)
+                  print("Patched u_ether.c (unused function fix with Regex)")
+              else:
+                  print("WARNING: Regex failed to match tx_timeout in u_ether.c")
           EOF
           
           python3 patcher.py
@@ -95,9 +112,6 @@ jobs:
           echo "=> Destroying Defconfig Checkers..."
           find common -name "build.config.*" -exec sed -i 's/check_defconfig//g' {} +
           find common -name "build.config.*" -exec sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/g' {} +
-
-          # NOTE: I REMOVED THE DESTRUCTIVE 'find ... Makefile' COMMAND HERE.
-          # We will rely on Kconfig to disable WERROR safely.
 
       - name: Setup KernelSU-Next & SUSFS
         working-directory: ${{ env.KERNEL_ROOT }}
