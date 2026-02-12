@@ -33,9 +33,11 @@ jobs:
           cp -r samsung_src/drivers/usb/gadget/function/* common/drivers/usb/gadget/function/
           cp -r samsung_src/drivers/usb/host/* common/drivers/usb/host/ || true
           
-          echo "=> BRUTE FORCE FIX: Injecting Audio Declaration..."
-          # By injecting this at Line 1 (Global Scope), we bypass the C99 'declaration after statement' error
+          echo "=> BRUTE FORCE FIX: Injecting Audio Declarations..."
+          # Fix 1: core.c missing xhci_exynos_audio_alloc
           sed -i '1s/^/struct device;\nextern int xhci_exynos_audio_alloc(struct device *dev);\n/' common/drivers/usb/dwc3/core.c
+          # Fix 2: xhci.c missing xhci_exynos_sync_dev_ctx
+          sed -i '1s/^/struct xhci_hcd;\nextern int xhci_exynos_sync_dev_ctx(struct xhci_hcd *xhci, int slot_id);\n/' common/drivers/usb/host/xhci.c
           
           echo "=> BRUTE FORCE FIX: Forcing Audio Compilation..."
           echo "obj-y += xhci-exynos-audio.o" >> common/drivers/usb/host/Makefile
