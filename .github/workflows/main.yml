@@ -39,6 +39,16 @@ jobs:
           # Fix 2: xhci.c missing xhci_exynos_sync_dev_ctx
           sed -i '1s/^/struct xhci_hcd;\nextern int xhci_exynos_sync_dev_ctx(struct xhci_hcd *xhci, int slot_id);\n/' common/drivers/usb/host/xhci.c
           
+          echo "=> BRUTE FORCE FIX: Extracting & Forcing URAM Audio Macro..."
+          # Fix 3: xhci-mem.c missing XHCI_USE_URAM_FOR_EXYNOS_AUDIO
+          # We extract the exact definition from Samsung's header and glue it to the top of the C file
+          URAM_DEF=$(grep -h "define XHCI_USE_URAM_FOR_EXYNOS_AUDIO" common/drivers/usb/host/xhci.h | head -n 1)
+          if [ -z "$URAM_DEF" ]; then URAM_DEF="#define XHCI_USE_URAM_FOR_EXYNOS_AUDIO 0"; fi
+          echo "#ifndef XHCI_USE_URAM_FOR_EXYNOS_AUDIO" > temp.h
+          echo "$URAM_DEF" >> temp.h
+          echo "#endif" >> temp.h
+          cat temp.h common/drivers/usb/host/xhci-mem.c > temp.c && mv temp.c common/drivers/usb/host/xhci-mem.c
+          
           echo "=> BRUTE FORCE FIX: Forcing Audio Compilation..."
           echo "obj-y += xhci-exynos-audio.o" >> common/drivers/usb/host/Makefile
           
