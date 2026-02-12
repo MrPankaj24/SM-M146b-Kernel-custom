@@ -18,27 +18,22 @@ jobs:
       - name: Sync Specific GKI Tag (5.15.153)
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
-          # We are targeting the specific release tag for 5.15.153
-          # If exact tag varies, we pull the manifest for the month/year that matches that release
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.15-lts --depth=1
           repo sync -j$(nproc) --force-sync
-          
-          # Force checkout to the specific kernel version commit if possible, 
-          # otherwise the branch above tracks the LTS releases. 
-          # Note: GKI LTS branches usually update strictly.
-          
-      - name: Inject Samsung Source (Minimal USB Only)
+
+      - name: Inject Samsung Source (USB + Host)
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
           echo "=> Cloning SM-M146B Source..."
           git clone https://github.com/MrPankaj24/SM-M146B-Kernel-Source.git --depth=1 samsung_src
           
-          echo "=> Porting ONLY Essential USB Drivers..."
-          # We only replace the DWC3 driver, we do NOT touch the host driver this time
-          # This relies on the GKI host driver being compatible with the 5.15.153 baseline
+          echo "=> Porting USB Drivers..."
           rm -rf common/drivers/usb/dwc3
           cp -r samsung_src/drivers/usb/dwc3 common/drivers/usb/
-          # We do NOT copy host/ because that caused the audio header mismatch
+          
+          # ---> THIS IS THE MISSING PIECE <---
+          # We must copy the host headers because dwc3/core.c includes them
+          cp -r samsung_src/drivers/usb/host/* common/drivers/usb/host/ || true
           
           echo "=> Applying Module Check Bypass (Force Load)..."
           sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' common/kernel/module.c || true
@@ -73,12 +68,11 @@ jobs:
           echo "=> Appending custom configs to gki_defconfig..."
           cat >> arch/arm64/configs/gki_defconfig << 'EOF'
           
-          # --- SAMSUNG USB (Minimal) ---
+          # --- SAMSUNG USB ---
           CONFIG_USB_DWC3_EXYNOS=y
           CONFIG_USB_F_RNDIS=y
           CONFIG_USB_CONFIGFS_F_TETHER=y
           CONFIG_USB_DWC3_DUAL_ROLE=y
-          # Note: We are NOT enabling XHCI_EXYNOS_AUDIO here to see if stock GKI handles it
           
           # --- KSU & SUSFS ---
           CONFIG_KSU=y
