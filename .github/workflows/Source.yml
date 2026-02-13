@@ -1,4 +1,4 @@
-name: Build Samsung M14 5G Kernel (Fixed V4)
+name: Build Samsung M14 5G Kernel (Fixed Branch)
 
 permissions:
   contents: write
@@ -22,8 +22,8 @@ jobs:
 
     - name: Clone Kernel Source
       run: |
-        # Cloning the specific Samsung M14 source
-        git clone https://github.com/devhunter1/android_kernel_samsung_s5e8535.git -b android13-5.15-lts kernel_workspace
+        # Fixed: Changed branch from 'android13-5.15-lts' to 'android13-5.15'
+        git clone https://github.com/devhunter1/android_kernel_samsung_s5e8535.git -b android13-5.15 kernel_workspace
       
     - name: Clone Toolchains
       run: |
