@@ -1,4 +1,4 @@
-name: Samsung M14 Custom Kernel
+name: Samsung M14 Custom Kernel (Final Fix)
 
 on:
   workflow_dispatch:
@@ -33,21 +33,22 @@ jobs:
           cp -r samsung_src/drivers/usb/gadget/function/* common/drivers/usb/gadget/function/
           cp -r samsung_src/drivers/usb/host/* common/drivers/usb/host/ || true
           
-          echo "=> Porting Essential SoC Headers..."
+          echo "=> Porting SoC Headers..."
           mkdir -p common/include/soc/samsung
           cp -r samsung_src/include/soc/samsung/* common/include/soc/samsung/ || true
-          
-          echo "=> Porting Device Tree Bindings..."
           mkdir -p common/include/dt-bindings/soc/samsung
           cp -r samsung_src/include/dt-bindings/soc/samsung/* common/include/dt-bindings/soc/samsung/ || true
           
-          echo "=> CREATING SAMSUNG STUBS (The Linker Fix)..."
-          # This file provides dummy symbols for everything the linker is missing.
-          # It prevents the 'undefined symbol' errors.
+          echo "=> CREATING SAMSUNG STUBS (Fixed)..."
+          # We define a dummy wake_lock struct so the compiler doesn't crash.
           cat <<EOF > common/drivers/usb/host/samsung_stubs.c
           #include <linux/kernel.h>
           #include <linux/device.h>
-          #include <linux/pm_wakeup.h>
+          
+          // Dummy struct definition to satisfy the compiler
+          struct wake_lock {
+              int dummy;
+          };
           
           // Audio Stubs
           int xhci_exynos_audio_alloc(struct device *dev) { return 0; }
@@ -61,14 +62,13 @@ jobs:
           void exynos_usbdrd_phy_vendor_set(void) {}
           
           // Missing Global Variables
-          // We define these so the linker finds the memory address
           struct wake_lock main_hcd_wakelock;
           struct wake_lock shared_hcd_wakelock;
-          int xhci_exynos_pm_state;
-          int usb_dr_role_control;
+          int xhci_exynos_pm_state = 0;
+          int usb_dr_role_control = 0;
           EOF
 
-          echo "=> RUNNING PYTHON SURGEON (Header Fixes)..."
+          echo "=> RUNNING PYTHON SURGEON..."
           cat <<EOF > patcher.py
           import os
           import re
@@ -125,7 +125,6 @@ jobs:
           python3 patcher.py
           
           echo "=> Forcing Stubs Compilation..."
-          # We add our stubs file to the makefile so it gets linked into the kernel
           echo "obj-y += samsung_stubs.o" >> common/drivers/usb/host/Makefile
           
           echo "=> Applying Module Check Bypass..."
@@ -134,26 +133,8 @@ jobs:
           echo "=> Destroying Defconfig Checkers..."
           find common -name "build.config.*" -exec sed -i 's/check_defconfig//g' {} +
           find common -name "build.config.*" -exec sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/g' {} +
-
-      - name: Setup KernelSU-Next & SUSFS
-        working-directory: ${{ env.KERNEL_ROOT }}
-        run: |
-          echo "=> Fetching KernelSU-Next..."
-          cd common
-          curl -ls https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh | bash - || true
-          cd ..
           
-          echo "=> Fetching and Patching SUSFS..."
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 || true
-          if [ -d "susfs4ksu" ]; then
-            cp -r susfs4ksu/kernel_patches/fs/* common/fs/ || true
-            cp -r susfs4ksu/kernel_patches/include/linux/* common/include/linux/ || true
-            cd common
-            for patch in ../susfs4ksu/kernel_patches/*.patch; do
-              patch -p1 < "$patch" || true
-            done
-            cd ..
-          fi
+          # NOTE: WERROR is handled in Kconfig below, safer than deleting makefiles.
 
       - name: Configure Kernel Features
         working-directory: ${{ env.KERNEL_ROOT }}/common
