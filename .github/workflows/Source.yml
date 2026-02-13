@@ -1,4 +1,4 @@
-name: Samsung M14 Native Build (Super Safe Mode)
+name: Samsung M14 Native Build (FMP Fix)
 
 on:
   workflow_dispatch:
@@ -63,8 +63,11 @@ jobs:
           echo "=> Fixing GPU Driver Typo..."
           find drivers -name "mali_kbase_mem_linux.c" -exec sed -i 's/TIMED_OUT/ETIMEDOUT/g' {} +
           
-          echo "=> REMOVING BROKEN KNOX/UFS DRIVER..."
+          echo "=> REMOVING BROKEN KNOX/UFS DRIVERS..."
+          # 1. Disable SRPMB (caused the previous error)
           sed -i 's/obj-$(CONFIG_SCSI_UFS_EXYNOS_SRPMB)/# obj-$(CONFIG_SCSI_UFS_EXYNOS_SRPMB)/g' drivers/scsi/ufs/Makefile
+          # 2. Disable FMP (caused the CURRENT error) - Deleting the line that compiles it
+          sed -i '/ufs-exynos-fmp.o/d' drivers/scsi/ufs/Makefile
 
       - name: Configure Kernel
         working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
@@ -91,16 +94,15 @@ jobs:
           ./scripts/config --file .config --enable CONFIG_USB_F_NCM
           ./scripts/config --file .config --enable CONFIG_USB_F_RNDIS
           
-          echo "=> Disabling Bloat & Errors (MAXIMUM SAFETY)..."
+          echo "=> Disabling Bloat & Errors..."
           ./scripts/config --file .config --disable CONFIG_MODULE_SIG
-          ./scripts/config --file .config --disable CONFIG_DEBUG_INFO
           ./scripts/config --file .config --disable CONFIG_DEBUG_INFO_BTF
           ./scripts/config --file .config --disable CONFIG_WERROR
+          # Explicitly disable the broken UFS configs
           ./scripts/config --file .config --disable CONFIG_SCSI_UFS_EXYNOS_SRPMB
-          # Disabling these heavy features to save RAM
-          ./scripts/config --file .config --disable CONFIG_KASAN
-          ./scripts/config --file .config --disable CONFIG_KCSAN
-          ./scripts/config --file .config --disable CONFIG_UBSAN
+          ./scripts/config --file .config --disable CONFIG_SCSI_UFS_EXYNOS_FMP
+          
+          # Disable Logging to save RAM
           ./scripts/config --file .config --disable CONFIG_SAMSUNG_SCSC_LOG_COLLECTION
           
           make olddefconfig
@@ -114,24 +116,20 @@ jobs:
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CC=clang
           
-          echo "=> Building Image (SUPER SLOW MODE)..."
-          # -j1 is critical here. It prevents RAM exhaustion.
-          make -j1 LLVM=1 KCFLAGS="-w" Image
-
-      - name: Check for Image
-        working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
-        run: |
-          if [ -f arch/arm64/boot/Image ]; then
-             echo "SUCCESS: Kernel Image found!"
-          else
-             echo "FAILURE: Kernel Image not found."
-             exit 1
-          fi
+          echo "=> Building Image (Safe Mode - 2 Cores)..."
+          # -j2 is safe. It's faster than -j1 but won't crash the server.
+          make -j2 LLVM=1 KCFLAGS="-w" Image
 
       - name: Package AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git
-          cp ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14/arch/arm64/boot/Image AnyKernel3/
+          if [ -f ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14/arch/arm64/boot/Image ]; then
+             cp ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14/arch/arm64/boot/Image AnyKernel3/
+          else
+             echo "Image file not found! Checking directory..."
+             ls -R ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14/arch/arm64/boot/
+             exit 1
+          fi
           cd AnyKernel3
           zip -r9 ../M146B-Native-Kernel.zip * -x .git*
 
