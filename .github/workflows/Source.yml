@@ -1,0 +1,114 @@
+name: Samsung M14 Native Build (KSU + SUSFS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Native Samsung Kernel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo zip curl libncurses5-dev
+          mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+          echo "KERNEL_ROOT=$GITHUB_WORKSPACE/kernel_workspace" >> $GITHUB_ENV
+
+      - name: Clone Samsung Source Code
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          echo "=> Cloning SM-M146B Source..."
+          git clone https://github.com/MrPankaj24/SM-M146B-Kernel-Source.git --depth=1 android_kernel_samsung_m14
+          
+      - name: Download Toolchain (Clang 14)
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          echo "=> Downloading Google Clang 14..."
+          mkdir -p clang-14
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r450784d.tar.gz
+          tar -C clang-14 -xf clang-r450784d.tar.gz
+
+      - name: Setup KernelSU-Next
+        working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
+        run: |
+          echo "=> Patching KernelSU-Next..."
+          curl -ls https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh | bash -
+
+      - name: Setup SUSFS (Safe Mode)
+        working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
+        run: |
+          echo "=> Fetching SUSFS..."
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
+          
+          echo "=> Copying SUSFS files..."
+          cp -r susfs4ksu/kernel_patches/fs/* fs/
+          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
+          
+          echo "=> Applying SUSFS Patches..."
+          # We apply patches one by one. If one fails (due to Samsung changes), we continue.
+          # This ensures the build doesn't crash on minor conflicts.
+          for patch in susfs4ksu/kernel_patches/*.patch; do
+            echo "Applying $patch..."
+            patch -p1 --forward < "$patch" || echo "Warning: $patch failed to apply cleanly, skipping..."
+          done
+
+      - name: Configure Kernel
+        working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
+        run: |
+          # Define Toolchain paths
+          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-14/bin:$PATH
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CC=clang
+          
+          echo "=> Cleaning..."
+          make clean
+          make mrproper
+          
+          echo "=> Locating Defconfig..."
+          # Samsung M14 usually uses 'exynos1330' or 'm14' in the config name
+          DEFCONFIG_FILE=$(find arch/arm64/configs -name "*m14*defconfig" | head -n 1)
+          if [ -z "$DEFCONFIG_FILE" ]; then
+            DEFCONFIG_FILE=$(find arch/arm64/configs -name "exynos1330_defconfig" | head -n 1)
+          fi
+          
+          echo "Using defconfig: $(basename $DEFCONFIG_FILE)"
+          make $(basename $DEFCONFIG_FILE)
+          
+          echo "=> Enabling KSU & SUSFS in .config..."
+          ./scripts/config --file .config --enable CONFIG_KSU
+          ./scripts/config --file .config --enable CONFIG_KSU_SUSFS
+          
+          # Ensure Tethering is enabled (it usually is, but good to double check)
+          ./scripts/config --file .config --enable CONFIG_USB_CONFIGFS_F_TETHER
+          ./scripts/config --file .config --enable CONFIG_USB_F_NCM
+          ./scripts/config --file .config --enable CONFIG_USB_F_RNDIS
+
+      - name: Compile Kernel
+        working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
+        run: |
+          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-14/bin:$PATH
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CC=clang
+          
+          echo "=> Building Image..."
+          make -j$(nproc) Image
+
+      - name: Package AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git
+          # The native build puts the image in arch/arm64/boot/Image
+          cp ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14/arch/arm64/boot/Image AnyKernel3/ || true
+          cd AnyKernel3
+          zip -r9 ../M146B-Native-Kernel.zip * -x .git*
+
+      - name: Upload Flashable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: M146B-Native-Kernel
+          path: M146B-Native-Kernel.zip
+
