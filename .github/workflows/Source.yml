@@ -1,4 +1,4 @@
-name: Samsung M14 Native Build (No Knox / UFS Fix)
+name: Samsung M14 Native Build (Safe Mode)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,6 @@ jobs:
       - name: Setup Build Environment
         run: |
           sudo apt-get update
-          # Install all dependencies including GCC, LZ4, CPIO (Required for Samsung)
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo zip curl libncurses5-dev gcc-aarch64-linux-gnu lz4 dwarves cpio
           
           mkdir -p $GITHUB_WORKSPACE/kernel_workspace
@@ -65,7 +64,6 @@ jobs:
           find drivers -name "mali_kbase_mem_linux.c" -exec sed -i 's/TIMED_OUT/ETIMEDOUT/g' {} +
           
           echo "=> REMOVING BROKEN KNOX/UFS DRIVER..."
-          # This command modifies the Makefile to IGNORE the broken file
           sed -i 's/obj-$(CONFIG_SCSI_UFS_EXYNOS_SRPMB)/# obj-$(CONFIG_SCSI_UFS_EXYNOS_SRPMB)/g' drivers/scsi/ufs/Makefile
 
       - name: Configure Kernel
@@ -93,11 +91,17 @@ jobs:
           ./scripts/config --file .config --enable CONFIG_USB_F_NCM
           ./scripts/config --file .config --enable CONFIG_USB_F_RNDIS
           
-          echo "=> Disabling Broken Features (Knox/Security/Signing)..."
+          echo "=> Disabling Bloat & Errors (RAM Saving Mode)..."
           ./scripts/config --file .config --disable CONFIG_MODULE_SIG
+          ./scripts/config --file .config --disable CONFIG_DEBUG_INFO
           ./scripts/config --file .config --disable CONFIG_DEBUG_INFO_BTF
+          ./scripts/config --file .config --disable CONFIG_DEBUG_INFO_DWARF4
+          ./scripts/config --file .config --enable CONFIG_DEBUG_INFO_NONE
           ./scripts/config --file .config --disable CONFIG_WERROR
           ./scripts/config --file .config --disable CONFIG_SCSI_UFS_EXYNOS_SRPMB
+          
+          # Disable Samsung WiFi Logging to save RAM/Time
+          ./scripts/config --file .config --disable CONFIG_SAMSUNG_SCSC_LOG_COLLECTION
           
           make olddefconfig
 
@@ -110,14 +114,13 @@ jobs:
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CC=clang
           
-          echo "=> Building Image..."
-          # KCFLAGS="-w" disables all compiler warnings to prevent random stops
-          make -j$(nproc) LLVM=1 KCFLAGS="-w" Image
+          echo "=> Building Image (Safe Slow Mode)..."
+          # -j1 ensures we do NOT run out of RAM.
+          make -j2 LLVM=1 KCFLAGS="-w" Image
 
       - name: Package AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git
-          # Native builds put Image in arch/arm64/boot/
           if [ -f ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14/arch/arm64/boot/Image ]; then
              cp ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14/arch/arm64/boot/Image AnyKernel3/
           else
