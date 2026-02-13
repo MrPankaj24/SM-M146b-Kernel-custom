@@ -1,4 +1,4 @@
-name: Samsung M14 Native Build (Final Fix)
+name: Samsung M14 Native Build (Bulldozer Fix)
 
 on:
   workflow_dispatch:
@@ -11,8 +11,8 @@ jobs:
       - name: Setup Build Environment
         run: |
           sudo apt-get update
-          # We install GCC and Ncurses (required for menuconfig/headers)
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo zip curl libncurses5-dev gcc-aarch64-linux-gnu
+          # Added lz4 (compression), dwarves (pahole), and cpio (ramdisk)
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo zip curl libncurses5-dev gcc-aarch64-linux-gnu lz4 dwarves cpio
           
           mkdir -p $GITHUB_WORKSPACE/kernel_workspace
           echo "KERNEL_ROOT=$GITHUB_WORKSPACE/kernel_workspace" >> $GITHUB_ENV
@@ -59,22 +59,17 @@ jobs:
         working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
         run: |
           echo "=> Fixing missing Camera Makefile..."
-          # Create the missing directory that caused the crash
           mkdir -p drivers/media/platform/exynos/camera/vendor/default
-          # Create an empty Makefile so the build system finds it
           echo "obj-n := dummy.o" > drivers/media/platform/exynos/camera/vendor/default/Makefile
 
       - name: Configure Kernel
         working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
         run: |
-          # Define Toolchain paths
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-14/bin:$PATH
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CC=clang
-          
-          # SKIP 'make clean' to avoid triggering the camera folder check
           
           echo "=> Locating Defconfig..."
           DEFCONFIG_FILE=$(find arch/arm64/configs -name "*m14*defconfig" | head -n 1)
@@ -85,32 +80,36 @@ jobs:
           echo "Using defconfig: $(basename $DEFCONFIG_FILE)"
           make $(basename $DEFCONFIG_FILE)
           
-          echo "=> Enabling KSU & Tethering in .config..."
+          echo "=> Enabling Features & Disabling WERROR..."
           ./scripts/config --file .config --enable CONFIG_KSU
           ./scripts/config --file .config --enable CONFIG_KSU_SUSFS
           ./scripts/config --file .config --enable CONFIG_USB_CONFIGFS_F_TETHER
           ./scripts/config --file .config --enable CONFIG_USB_F_NCM
           ./scripts/config --file .config --enable CONFIG_USB_F_RNDIS
           
+          # NUCLEAR WERROR DISABLE
+          ./scripts/config --file .config --disable CONFIG_WERROR
+          ./scripts/config --file .config --disable CONFIG_WERROR_ON_BEHALF_OF_DRIVERS
+          
           make olddefconfig
 
       - name: Compile Kernel
         working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
         run: |
-          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-14/bin:/usr/bin:$PATH
+          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-14/bin:$PATH
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CC=clang
           
           echo "=> Building Image..."
-          # -k ignores minor errors in drivers (like camera sensors) and keeps building the main kernel
-          make -j$(nproc) -k Image
+          # KCFLAGS="-w" tells the compiler to shut up about all warnings
+          # LLVM=1 ensures we use the full Clang toolchain (ar, nm, etc.)
+          make -j$(nproc) LLVM=1 KCFLAGS="-w" Image
 
       - name: Package AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git
-          # Native builds put Image in arch/arm64/boot/
           cp ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14/arch/arm64/boot/Image AnyKernel3/ || true
           cd AnyKernel3
           zip -r9 ../M146B-Native-Kernel.zip * -x .git*
