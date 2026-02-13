@@ -1,4 +1,4 @@
-name: Samsung M14 Native Build (GPU Fix)
+name: Samsung M14 Native Build (Smart Fix)
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ jobs:
       - name: Setup Build Environment
         run: |
           sudo apt-get update
+          # Install all dependencies including GCC, LZ4, CPIO (Required for Samsung)
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo zip curl libncurses5-dev gcc-aarch64-linux-gnu lz4 dwarves cpio
           
           mkdir -p $GITHUB_WORKSPACE/kernel_workspace
@@ -48,21 +49,23 @@ jobs:
           cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
           
           echo "=> Applying SUSFS Patches..."
+          # Apply patches safely
           for patch in susfs4ksu/kernel_patches/*.patch; do
             echo "Applying $patch..."
             patch -p1 --forward < "$patch" || echo "Warning: $patch failed to apply, skipping..."
           done
 
-      - name: Fix Broken Samsung Source
+      - name: Fix Samsung Source Errors
         working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
         run: |
           echo "=> Fixing missing Camera Makefile..."
           mkdir -p drivers/media/platform/exynos/camera/vendor/default
           echo "obj-n := dummy.o" > drivers/media/platform/exynos/camera/vendor/default/Makefile
           
-          echo "=> Fixing GPU Driver Typo (TIMED_OUT -> ETIMEDOUT)..."
-          # This fixes the specific compile error you just hit
-          sed -i 's/TIMED_OUT/ETIMEDOUT/g' drivers/gpu/mali/mali_valhall/mali_kbase_mem_linux.c
+          echo "=> Smart-Fixing GPU Driver Typo..."
+          # Instead of hardcoding the path, we find the file and patch it
+          find drivers -name "mali_kbase_mem_linux.c" -exec sed -i 's/TIMED_OUT/ETIMEDOUT/g' {} +
+          echo "GPU Patch applied successfully."
 
       - name: Configure Kernel
         working-directory: ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14
@@ -82,17 +85,21 @@ jobs:
           echo "Using defconfig: $(basename $DEFCONFIG_FILE)"
           make $(basename $DEFCONFIG_FILE)
           
-          echo "=> Enabling KSU & Tethering..."
+          echo "=> Enabling Features..."
           ./scripts/config --file .config --enable CONFIG_KSU
           ./scripts/config --file .config --enable CONFIG_KSU_SUSFS
           ./scripts/config --file .config --enable CONFIG_USB_CONFIGFS_F_TETHER
           ./scripts/config --file .config --enable CONFIG_USB_F_NCM
           ./scripts/config --file .config --enable CONFIG_USB_F_RNDIS
           
-          echo "=> Disabling Errors & Signing..."
+          echo "=> Disabling Problematic Configs..."
+          # Disable Module Signing (Fixes openssl error)
           ./scripts/config --file .config --disable CONFIG_MODULE_SIG
-          ./scripts/config --file .config --disable CONFIG_MODULE_SIG_ALL
+          
+          # Disable BTF (Fixes pahole error)
           ./scripts/config --file .config --disable CONFIG_DEBUG_INFO_BTF
+          
+          # Disable WERROR (Fixes strict compile errors)
           ./scripts/config --file .config --disable CONFIG_WERROR
           
           make olddefconfig
@@ -107,11 +114,13 @@ jobs:
           export CC=clang
           
           echo "=> Building Image..."
-          make -j$(nproc) -k LLVM=1 KCFLAGS="-w" Image
+          # KCFLAGS="-w" disables all compiler warnings
+          make -j$(nproc) LLVM=1 KCFLAGS="-w" Image
 
       - name: Package AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git
+          # Native builds put Image in arch/arm64/boot/
           cp ${{ env.KERNEL_ROOT }}/android_kernel_samsung_m14/arch/arm64/boot/Image AnyKernel3/ || true
           cd AnyKernel3
           zip -r9 ../M146B-Native-Kernel.zip * -x .git*
@@ -121,4 +130,3 @@ jobs:
         with:
           name: M146B-Native-Kernel
           path: M146B-Native-Kernel.zip
-
