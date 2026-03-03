@@ -3,10 +3,10 @@
 #  Source : MrPankaj24/SM-M146B-Kernel-Source
 #  Target : Samsung SM-M146B (Exynos s5e8535)
 # ============================================================
+
 name: "🏗️ Build Kernel"
 
 on:
-
   workflow_dispatch:
     inputs:
       KERNEL_BRANCH:
@@ -37,7 +37,7 @@ env:
   TARGET_ARCH:     "arm64"
   TARGET_SOC:      "s5e8535"
   KERNEL_BRANCH:   ${{ github.event.inputs.KERNEL_BRANCH || 'main' }}
-  DEFCONFIG:       ${{ github.event.inputs.DEFCONFIG     || 'erd8535_t_gki_defconfig' }}
+  DEFCONFIG:       ${{ github.event.inputs.DEFCONFIG || 'erd8535_t_gki_defconfig' }}
   BUILD_ANYKERNEL: ${{ github.event.inputs.BUILD_ANYKERNEL || 'true' }}
 
 jobs:
@@ -48,6 +48,7 @@ jobs:
       contents: write
 
     steps:
+
     # ----------------------------------------------------------
     # 1. Install build dependencies
     # ----------------------------------------------------------
@@ -62,7 +63,7 @@ jobs:
           libc6-dev libncurses-dev libx11-dev libreadline-dev \
           libgl1 libgl1-mesa-dev make bc grep tofrodos \
           python3-markdown libxml2-utils xsltproc \
-          libc6-dev libtinfo6 cpio kmod openssl libelf-dev \
+          libtinfo6 cpio kmod openssl libelf-dev \
           pahole libssl-dev libarchive-tools zstd rsync \
           binutils-aarch64-linux-gnu gcc-arm-linux-gnueabi \
           binutils-arm-linux-gnueabi ca-certificates ccache \
@@ -120,7 +121,7 @@ jobs:
           ccache-${{ env.TARGET_SOC }}-
 
     # ----------------------------------------------------------
-    # 5. Configure environment variables
+    # 5. Configure build environment
     # ----------------------------------------------------------
     - name: "⚙️ Configure build environment"
       run: |
@@ -133,14 +134,11 @@ jobs:
         echo "PATH=${CLANG_DIR}/bin:${PATH}" >> "$GITHUB_ENV"
         echo "CCACHE_DIR=${HOME}/.ccache"    >> "$GITHUB_ENV"
 
-        # Replace ld.lld from Neutron-Clang with the system one to avoid
-        # GLIBCXX version mismatch (toolchain ld.lld needs GLIBCXX_3.4.32).
-        # After the libstdc++6 upgrade above this is no longer needed as a
-        # fallback, but we keep the system symlink as a safety net.
+        # Replace broken toolchain ld.lld with system one if needed
         if [ -f "${CLANG_DIR}/bin/ld.lld" ]; then
-          SYSTEM_LLD="$(which ld.lld 2>/dev/null || true)";
+          SYSTEM_LLD="$(which ld.lld 2>/dev/null || true)"
           if [ -n "${SYSTEM_LLD}" ]; then
-            echo "[INFO] Replacing toolchain ld.lld with system ld.lld: ${SYSTEM_LLD}"
+            echo "[INFO] Replacing toolchain ld.lld with system: ${SYSTEM_LLD}"
             cp -f "${SYSTEM_LLD}" "${CLANG_DIR}/bin/ld.lld"
           fi
         fi
@@ -150,19 +148,19 @@ jobs:
         "${CLANG_DIR}/bin/ld.lld" --version || true
 
     # ----------------------------------------------------------
-    # 6. make defconfig
+    # 6. Generate .config
     # ----------------------------------------------------------
     - name: "🛠️ Generate .config (defconfig)"
       run: |
         cd "${KERNEL_SOURCE}"
-        make O="${KERNEL_OUT}"                          \
-             ARCH="${TARGET_ARCH}"                      \
-             CC="ccache ${CLANG_DIR}/bin/clang"         \
-             LD="${CLANG_DIR}/bin/ld.lld"               \
-             CLANG_TRIPLE="aarch64-linux-gnu-"          \
-             CROSS_COMPILE="aarch64-linux-gnu-"         \
-             CROSS_COMPILE_ARM32="arm-linux-gnueabi-"   \
-             LLVM=1 LLVM_IAS=1                          \
+        make O="${KERNEL_OUT}"                        \
+             ARCH="${TARGET_ARCH}"                    \
+             CC="ccache ${CLANG_DIR}/bin/clang"       \
+             LD="${CLANG_DIR}/bin/ld.lld"             \
+             CLANG_TRIPLE="aarch64-linux-gnu-"        \
+             CROSS_COMPILE="aarch64-linux-gnu-"       \
+             CROSS_COMPILE_ARM32="arm-linux-gnueabi-" \
+             LLVM=1 LLVM_IAS=1                        \
              "${DEFCONFIG}"
 
     # ----------------------------------------------------------
@@ -173,16 +171,16 @@ jobs:
         cd "${KERNEL_SOURCE}"
         BUILD_START=$(date +"%s")
 
-        make -j$(nproc --all)                           \
-             O="${KERNEL_OUT}"                          \
-             ARCH="${TARGET_ARCH}"                      \
-             CC="ccache ${CLANG_DIR}/bin/clang"         \
-             LD="${CLANG_DIR}/bin/ld.lld"               \
-             CLANG_TRIPLE="aarch64-linux-gnu-"          \
-             CROSS_COMPILE="aarch64-linux-gnu-"         \
-             CROSS_COMPILE_ARM32="arm-linux-gnueabi-"   \
-             LLVM=1 LLVM_IAS=1                          \
-             Image dtbs modules                         \
+        make -j$(nproc --all)                         \
+             O="${KERNEL_OUT}"                        \
+             ARCH="${TARGET_ARCH}"                    \
+             CC="ccache ${CLANG_DIR}/bin/clang"       \
+             LD="${CLANG_DIR}/bin/ld.lld"             \
+             CLANG_TRIPLE="aarch64-linux-gnu-"        \
+             CROSS_COMPILE="aarch64-linux-gnu-"       \
+             CROSS_COMPILE_ARM32="arm-linux-gnueabi-" \
+             LLVM=1 LLVM_IAS=1                        \
+             Image dtbs modules                       \
              2>&1 | tee "${KERNEL_OUT}/build.log"
 
         BUILD_END=$(date +"%s")
@@ -190,7 +188,7 @@ jobs:
         echo "Build time: $(( DIFF / 60 ))m $(( DIFF % 60 ))s"
 
     # ----------------------------------------------------------
-    # 8. Verify kernel image was produced
+    # 8. Verify kernel image
     # ----------------------------------------------------------
     - name: "✅ Verify kernel image"
       run: |
@@ -198,12 +196,12 @@ jobs:
         if [ ! -f "${IMAGE}" ]; then
           echo "::error::Kernel Image not found! Build likely failed."
           tail -100 "${KERNEL_OUT}/build.log"
-          exit 1;
+          exit 1
         fi
         echo "[INFO] Image found: $(du -sh ${IMAGE})"
 
     # ----------------------------------------------------------
-    # 9. Pack AnyKernel3 flashable zip (optional)
+    # 9. Pack AnyKernel3 zip
     # ----------------------------------------------------------
     - name: "📦 Pack AnyKernel3 zip"
       if: env.BUILD_ANYKERNEL == 'true'
@@ -213,7 +211,7 @@ jobs:
         cp "${KERNEL_OUT}/arch/${TARGET_ARCH}/boot/Image" AnyKernel3/
         DTB_PATH="${KERNEL_OUT}/arch/${TARGET_ARCH}/boot/dts/exynos"
         [ -f "${DTB_PATH}/${TARGET_SOC}.dtb" ] && cp "${DTB_PATH}/${TARGET_SOC}.dtb" AnyKernel3/dtb || true
-        [ -f "${KERNEL_OUT}/dtbo.img" ]         && cp "${KERNEL_OUT}/dtbo.img"        AnyKernel3/     || true
+        [ -f "${KERNEL_OUT}/dtbo.img" ] && cp "${KERNEL_OUT}/dtbo.img" AnyKernel3/ || true
 
         cat > AnyKernel3/anykernel.sh << 'AKEOF'
 # AnyKernel3 config - SM-M146B
@@ -251,16 +249,13 @@ AKEOF
       run: |
         ARTIFACTS_DIR="${{ github.workspace }}/artifacts"
         mkdir -p "${ARTIFACTS_DIR}"
-
         cp "${KERNEL_OUT}/arch/${TARGET_ARCH}/boot/Image" "${ARTIFACTS_DIR}/" || true
-
         DTB_PATH="${KERNEL_OUT}/arch/${TARGET_ARCH}/boot/dts/exynos"
         [ -f "${DTB_PATH}/${TARGET_SOC}.dtb" ] && cp "${DTB_PATH}/${TARGET_SOC}.dtb" "${ARTIFACTS_DIR}/" || true
-        [ -f "${KERNEL_OUT}/dtbo.img" ]         && cp "${KERNEL_OUT}/dtbo.img"        "${ARTIFACTS_DIR}/" || true
-        [ -f "${KERNEL_OUT}/build.log" ]        && cp "${KERNEL_OUT}/build.log"        "${ARTIFACTS_DIR}/" || true
+        [ -f "${KERNEL_OUT}/dtbo.img" ] && cp "${KERNEL_OUT}/dtbo.img" "${ARTIFACTS_DIR}/" || true
+        [ -f "${KERNEL_OUT}/build.log" ] && cp "${KERNEL_OUT}/build.log" "${ARTIFACTS_DIR}/" || true
         [ -n "${ZIP_NAME}" ] && [ -f "${{ github.workspace }}/${ZIP_NAME}" ] && \
           cp "${{ github.workspace }}/${ZIP_NAME}" "${ARTIFACTS_DIR}/" || true
-
         ls -lh "${ARTIFACTS_DIR}/"
 
     # ----------------------------------------------------------
