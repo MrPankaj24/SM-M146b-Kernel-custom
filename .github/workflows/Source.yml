@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     name: 🏗️ Build Kernel (s5e8535 / M14)
-    runs-on: ubuntu-24.04 # <--- UPDATED TO FIX GLIBCXX ERROR
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
 
     steps:
@@ -120,12 +120,6 @@ jobs:
           # ── Set up toolchain PATHs ──
           export PATH=$(pwd)/toolchain/clang/bin:$PATH
           export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH
-
-          # ── Host build flags ──
-          export HOSTCFLAGS="-I$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/include"
-          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
-            -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
-            -fuse-ld=lld --rtlib=compiler-rt"
 
           # ── Kernel build environment ──
           export DTC_FLAGS="-@"
