@@ -1,325 +1,231 @@
-# ============================================================
-#  SM-M146B Custom Kernel Builder
-#  Source : MrPankaj24/SM-M146B-Kernel-Source
-#  Target : Samsung SM-M146B (Exynos s5e8535)
-# ============================================================
-
-name: "🏗️ Build Kernel"
+name: 🏗️ Build Kernel (s5e8535 / M14 - Clang 20)
 
 on:
-  workflow_dispatch:
-    inputs:
-      KERNEL_BRANCH:
-        description: 'Kernel source branch'
-        required: false
-        default: 'main'
-      DEFCONFIG:
-        description: 'Defconfig name (must exist in arch/arm64/configs/)'
-        required: false
-        default: 's5e8535-m14xnsxx_defconfig'
-      BUILD_ANYKERNEL:
-        description: 'Pack AnyKernel3 flashable zip?'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-
-env:
-  KERNEL_REPO:     "https://github.com/MrPankaj24/SM-M146B-Kernel-Source.git"
-  DEVICE_MODEL:    "SM-M146B"
-  DEVICE_CODENAME: "m14x"
-  TARGET_ARCH:     "arm64"
-  TARGET_SOC:      "s5e8535"
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual trigger from GitHub UI
 
 jobs:
   build:
-    name: "🏗️ Build Kernel (${{ github.event.inputs.DEFCONFIG || 's5e8535-m14xnsxx_defconfig' }})"
+    name: 🏗️ Build Kernel (s5e8535 / M14)
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+    timeout-minutes: 120
 
     steps:
+      # ──────────────────────────────────────────────
+      # 1. Checkout kernel source (from your repo)
+      # ──────────────────────────────────────────────
+      - name: 📥 Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: MrPankaj24/SM-M146B-Kernel-Source
+          ref: main
+          fetch-depth: 1
 
-    # ----------------------------------------------------------
-    # 0. Resolve inputs with safe fallback defaults
-    # ----------------------------------------------------------
-    - name: "🔧 Resolve build inputs"
-      run: |
-        KERNEL_BRANCH="${{ github.event.inputs.KERNEL_BRANCH }}"
-        DEFCONFIG="${{ github.event.inputs.DEFCONFIG }}"
-        BUILD_ANYKERNEL="${{ github.event.inputs.BUILD_ANYKERNEL }}"
+      # ──────────────────────────────────────────────
+      # 2. Install dependencies
+      # ──────────────────────────────────────────────
+      - name: 📦 Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            git curl wget \
+            bc bison flex \
+            libssl-dev libelf-dev \
+            python3 python-is-python3 \
+            make gcc gcc-aarch64-linux-gnu \
+            binutils binutils-aarch64-linux-gnu \
+            g++ cpio zip unzip \
+            lz4 zstd xz-utils \
+            libncurses-dev libncurses5-dev \
+            kmod rsync \
+            lld llvm clang \
+            dwarves pahole \
+            ccache \
+            device-tree-compiler \
+            zlib1g-dev libc6-dev-i386 \
+            cmake ninja-build
 
-        # Apply defaults if empty (e.g. triggered by push or API)
-        KERNEL_BRANCH="${KERNEL_BRANCH:-main}"
-        DEFCONFIG="${DEFCONFIG:-s5e8535-m14xnsxx_defconfig}"
-        BUILD_ANYKERNEL="${BUILD_ANYKERNEL:-true}"
+      # ──────────────────────────────────────────────
+      # 3. Cache toolchains to speed up re-runs
+      # ──────────────────────────────────────────────
+      - name: 🔧 Cache Toolchains
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchain/clang
+            toolchain/build/kernel/build-tools
+            toolchain/prebuilts/kernel-build-tools
+          key: toolchain-neutron-clang-v1
 
-        echo "KERNEL_BRANCH=${KERNEL_BRANCH}"   >> "$GITHUB_ENV"
-        echo "DEFCONFIG=${DEFCONFIG}"           >> "$GITHUB_ENV"
-        echo "BUILD_ANYKERNEL=${BUILD_ANYKERNEL}" >> "$GITHUB_ENV"
+      # ──────────────────────────────────────────────
+      # 4. Download Neutron Clang (Clang 20)
+      # ──────────────────────────────────────────────
+      - name: ⬇️ Download Neutron Clang (Clang 20)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          echo "Downloading Neutron Clang via antman..."
+          mkdir -p toolchain/clang
+          cd toolchain/clang
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S
+          ./antman --patch=glibc
+          echo "✅ Clang version:"
+          bin/clang --version
 
-        echo "[INFO] KERNEL_BRANCH=${KERNEL_BRANCH}"
-        echo "[INFO] DEFCONFIG=${DEFCONFIG}"
-        echo "[INFO] BUILD_ANYKERNEL=${BUILD_ANYKERNEL}"
+      # ──────────────────────────────────────────────
+      # 5. Download Kernel Build Tools
+      # ──────────────────────────────────────────────
+      - name: ⬇️ Download Kernel Build Tools
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          echo "Cloning kernel/prebuilts/build-tools..."
+          git clone --depth=1 -b main \
+            https://android.googlesource.com/kernel/prebuilts/build-tools \
+            toolchain/build/kernel/build-tools
 
-    # ----------------------------------------------------------
-    # 1. Install build dependencies
-    # ----------------------------------------------------------
-    - name: "📦 Install build dependencies"
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends \
-          git device-tree-compiler lz4 xz-utils zlib1g-dev \
-          openjdk-17-jdk gcc g++ python3 python-is-python3 \
-          p7zip-full android-sdk-libsparse-utils erofs-utils \
-          gnupg flex bison gperf build-essential zip curl \
-          libc6-dev libncurses-dev libx11-dev libreadline-dev \
-          libgl1 libgl1-mesa-dev make bc grep tofrodos \
-          python3-markdown libxml2-utils xsltproc \
-          libtinfo6 cpio kmod openssl libelf-dev \
-          pahole libssl-dev libarchive-tools zstd rsync \
-          binutils-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-          binutils-arm-linux-gnueabi ca-certificates ccache \
-          lld llvm
+          # Create symlinks that the build expects
+          mkdir -p toolchain/build/kernel/build-tools/path
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/linux-x86 \
+            toolchain/build/kernel/build-tools/path/linux-x86
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/sysroots/x86_64-unknown-linux-musl \
+            toolchain/build/kernel/build-tools/sysroot
 
-        # libtinfo5 shim for older host tools
-        wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
-        sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          echo "✅ Build tools downloaded"
 
-        # Upgrade libstdc++6 to get GLIBCXX_3.4.32 (needed by Neutron-Clang ld.lld)
-        sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends libstdc++6
+      # ──────────────────────────────────────────────
+      # 6. Download Kernel Prebuilt Tools
+      # ──────────────────────────────────────────────
+      - name: ⬇️ Download Kernel Prebuilt Tools
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          echo "Cloning kernel/prebuilts/build-tools for pahole/BTF support..."
+          git clone --depth=1 \
+            https://android.googlesource.com/kernel/prebuilts/build-tools \
+            toolchain/prebuilts/kernel-build-tools
 
-    # ----------------------------------------------------------
-    # 2. Clone kernel source
-    # ----------------------------------------------------------
-    - name: "🗂️ Clone kernel source"
-      run: |
-        echo "[INFO] Cloning ${KERNEL_REPO} @ ${KERNEL_BRANCH}"
-        git clone --depth=1 --branch "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel-source
-        echo "KERNEL_SOURCE=${{ github.workspace }}/kernel-source" >> "$GITHUB_ENV"
+          echo "✅ Kernel prebuilt tools downloaded"
 
-    # ----------------------------------------------------------
-    # 3. Validate defconfig exists
-    # ----------------------------------------------------------
-    - name: "🔍 Validate defconfig"
-      run: |
-        DEFCONFIG_PATH="${{ github.workspace }}/kernel-source/arch/${TARGET_ARCH}/configs/${DEFCONFIG}"
-        echo "[INFO] Looking for: ${DEFCONFIG_PATH}"
-        if [ ! -f "${DEFCONFIG_PATH}" ]; then
-          echo "::error::Defconfig not found: arch/${TARGET_ARCH}/configs/${DEFCONFIG}"
-          echo ""
-          echo "Available defconfigs in arch/${TARGET_ARCH}/configs/:"
-          ls "${{ github.workspace }}/kernel-source/arch/${TARGET_ARCH}/configs/" || echo "(directory empty or not found)"
-          exit 1
-        fi
-        echo "[INFO] ✅ Defconfig found: ${DEFCONFIG}"
+      # ──────────────────────────────────────────────
+      # 7. Build the Kernel
+      # ──────────────────────────────────────────────
+      - name: 🔨 Build Kernel
+        run: |
+          set -e
 
-    # ----------------------------------------------------------
-    # 4. Cache Neutron-Clang toolchain
-    # ----------------------------------------------------------
-    - name: "⚡ Cache Neutron-Clang"
-      id: cache-clang
-      uses: actions/cache@v4
-      with:
-        path: ${{ github.workspace }}/toolchains/neutron-clang
-        key: neutron-clang-${{ runner.os }}-latest
+          # ── Set up toolchain PATHs ──
+          export PATH=$(pwd)/toolchain/clang/bin:$PATH
+          export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH
 
-    - name: "🔧 Download Neutron-Clang (if not cached)"
-      if: steps.cache-clang.outputs.cache-hit != 'true'
-      run: |
-        mkdir -p "${{ github.workspace }}/toolchains/neutron-clang"
-        cd "${{ github.workspace }}/toolchains/neutron-clang"
-        curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
-        chmod +x antman
-        bash antman -S
-        bash antman --patch=glibc
+          # ── Host build flags ──
+          export HOSTCFLAGS="-I$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/include"
+          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
+            -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
+            -fuse-ld=lld --rtlib=compiler-rt"
 
-    # ----------------------------------------------------------
-    # 5. Set up ccache
-    # ----------------------------------------------------------
-    - name: "🗃️ Set up ccache"
-      uses: actions/cache@v4
-      with:
-        path: ~/.ccache
-        key: ccache-${{ env.TARGET_SOC }}-${{ env.DEFCONFIG }}-${{ github.sha }}
-        restore-keys: |
-          ccache-${{ env.TARGET_SOC }}-${{ env.DEFCONFIG }}-
-          ccache-${{ env.TARGET_SOC }}-
+          # ── Kernel build environment ──
+          export DTC_FLAGS="-@"
+          export PLATFORM_VERSION=15
+          export ANDROID_MAJOR_VERSION=v
+          export LLVM=1
+          export LLVM_IAS=1
+          export DEPMOD=depmod
+          export ARCH=arm64
+          export TARGET_SOC=s5e8535
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          
+          # Tell Clang 20 not to treat warnings as build-breaking errors
+          export KCFLAGS="-Wno-error"
 
-    # ----------------------------------------------------------
-    # 6. Configure build environment
-    # ----------------------------------------------------------
-    - name: "⚙️ Configure build environment"
-      run: |
-        CLANG_DIR="${{ github.workspace }}/toolchains/neutron-clang"
-        KERNEL_OUT="${{ github.workspace }}/out"
-        mkdir -p "${KERNEL_OUT}"
+          echo "PLATFORM_VERSION = $PLATFORM_VERSION"
+          echo "ANDROID_MAJOR_VERSION = $ANDROID_MAJOR_VERSION"
+          echo "ARCH = $ARCH"
 
-        echo "CLANG_DIR=${CLANG_DIR}"        >> "$GITHUB_ENV"
-        echo "KERNEL_OUT=${KERNEL_OUT}"      >> "$GITHUB_ENV"
-        echo "PATH=${CLANG_DIR}/bin:${PATH}" >> "$GITHUB_ENV"
-        echo "CCACHE_DIR=${HOME}/.ccache"    >> "$GITHUB_ENV"
+          # ── Step 1: Generate .config from defconfig ──
+          echo ">>> Generating defconfig..."
+          make s5e8535-m14xnsxx_defconfig
 
-        # Replace broken toolchain ld.lld with system one if needed
-        if [ -f "${CLANG_DIR}/bin/ld.lld" ]; then
-          SYSTEM_LLD="$(which ld.lld 2>/dev/null || true)"
-          if [ -n "${SYSTEM_LLD}" ]; then
-            echo "[INFO] Replacing toolchain ld.lld with system: ${SYSTEM_LLD}"
-            cp -f "${SYSTEM_LLD}" "${CLANG_DIR}/bin/ld.lld"
+          # ── Step 2: Build kernel ──
+          echo ">>> Building kernel with $(nproc) jobs..."
+          make -j$(nproc) 2>&1 | tee /tmp/kernel_build.log
+
+          echo "✅ Build completed!"
+
+      # ──────────────────────────────────────────────
+      # 8. Collect build artifacts & Fix DTB Path
+      # ──────────────────────────────────────────────
+      - name: 📦 Collect Kernel Artifacts
+        if: success()
+        run: |
+          mkdir -p out/kernel
+          mkdir -p out/dtbs
+
+          # Copy the kernel image
+          if [ -f arch/arm64/boot/Image ]; then
+            cp arch/arm64/boot/Image out/kernel/
+            echo "✅ Copied Image"
           fi
-        fi
 
-        ls "${CLANG_DIR}/bin/clang" || { echo "ERROR: Clang not found!"; exit 1; }
-        "${CLANG_DIR}/bin/clang" --version
-        "${CLANG_DIR}/bin/ld.lld" --version || true
+          if [ -f arch/arm64/boot/Image.gz ]; then
+            cp arch/arm64/boot/Image.gz out/kernel/
+            echo "✅ Copied Image.gz"
+          fi
 
-    # ----------------------------------------------------------
-    # 7. Generate .config
-    # ----------------------------------------------------------
-    - name: "🛠️ Generate .config (defconfig)"
-      run: |
-        cd "${KERNEL_SOURCE}"
-        make O="${KERNEL_OUT}"                        \
-             ARCH="${TARGET_ARCH}"                    \
-             CC="ccache ${CLANG_DIR}/bin/clang"       \
-             LD="${CLANG_DIR}/bin/ld.lld"             \
-             CLANG_TRIPLE="aarch64-linux-gnu-"        \
-             CROSS_COMPILE="aarch64-linux-gnu-"       \
-             CROSS_COMPILE_ARM32="arm-linux-gnueabi-" \
-             LLVM=1 LLVM_IAS=1                        \
-             "${DEFCONFIG}"
+          # Copy device tree blobs for m14x
+          if [ -d arch/arm64/boot/dts/samsung/m14x ]; then
+            find arch/arm64/boot/dts/samsung/m14x -name "*.dtb" -exec cp {} out/dtbs/ \;
+            echo "✅ Copied m14x DTBs"
+          else
+            echo "❌ DTB folder arch/arm64/boot/dts/samsung/m14x not found!"
+          fi
 
-    # ----------------------------------------------------------
-    # 8. Build kernel
-    # ----------------------------------------------------------
-    - name: "🔨 Build kernel"
-      run: |
-        cd "${KERNEL_SOURCE}"
-        BUILD_START=$(date +"%s")
+      # ──────────────────────────────────────────────
+      # 9. Package with AnyKernel3
+      # ──────────────────────────────────────────────
+      - name: 📦 Package AnyKernel3
+        if: success()
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          rm -rf AnyKernel3/.git
+          cp out/kernel/Image AnyKernel3/
+          
+          # Try to copy dtbs into the root of AnyKernel3 and dtb directory
+          mkdir -p AnyKernel3/dtb
+          cp out/dtbs/*.dtb AnyKernel3/dtb/ || true
+          cp out/dtbs/*.dtb AnyKernel3/ || true
+          
+          # Modify AnyKernel3/anykernel.sh for Samsung M14
+          sed -i 's/block=.*/block=auto;/' AnyKernel3/anykernel.sh
+          sed -i 's/is_slot_device=0;/is_slot_device=auto;/' AnyKernel3/anykernel.sh
+          
+          cd AnyKernel3
+          zip -r9 ../AnyKernel3-M14-Clang20.zip *
+          echo "✅ AnyKernel3 zip created"
 
-        make -j$(nproc --all)                         \
-             O="${KERNEL_OUT}"                        \
-             ARCH="${TARGET_ARCH}"                    \
-             CC="ccache ${CLANG_DIR}/bin/clang"       \
-             LD="${CLANG_DIR}/bin/ld.lld"             \
-             CLANG_TRIPLE="aarch64-linux-gnu-"        \
-             CROSS_COMPILE="aarch64-linux-gnu-"       \
-             CROSS_COMPILE_ARM32="arm-linux-gnueabi-" \
-             LLVM=1 LLVM_IAS=1                        \
-             Image dtbs modules                       \
-             2>&1 | tee "${KERNEL_OUT}/build.log"
+      # ──────────────────────────────────────────────
+      # 10. Upload artifacts
+      # ──────────────────────────────────────────────
+      - name: ⬆️ Upload Bootable Kernel Zip
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-s5e8535-m14-Clang20
+          path: AnyKernel3-M14-Clang20.zip
+          retention-days: 30
 
-        BUILD_END=$(date +"%s")
-        DIFF=$(( BUILD_END - BUILD_START ))
-        echo "Build time: $(( DIFF / 60 ))m $(( DIFF % 60 ))s"
-
-    # ----------------------------------------------------------
-    # 9. Verify kernel image
-    # ----------------------------------------------------------
-    - name: "✅ Verify kernel image"
-      run: |
-        IMAGE="${KERNEL_OUT}/arch/${TARGET_ARCH}/boot/Image"
-        if [ ! -f "${IMAGE}" ]; then
-          echo "::error::Kernel Image not found! Build likely failed."
-          tail -100 "${KERNEL_OUT}/build.log"
-          exit 1
-        fi
-        echo "[INFO] Image found: $(du -sh ${IMAGE})"
-
-    # ----------------------------------------------------------
-    # 10. Pack AnyKernel3 zip
-    # ----------------------------------------------------------
-    - name: "📦 Pack AnyKernel3 zip"
-      if: env.BUILD_ANYKERNEL == 'true'
-      run: |
-        git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-        rm -f AnyKernel3/*.sh AnyKernel3/README.md
-        cp "${KERNEL_OUT}/arch/${TARGET_ARCH}/boot/Image" AnyKernel3/
-        DTB_PATH="${KERNEL_OUT}/arch/${TARGET_ARCH}/boot/dts/exynos"
-        [ -f "${DTB_PATH}/${TARGET_SOC}.dtb" ] && cp "${DTB_PATH}/${TARGET_SOC}.dtb" AnyKernel3/dtb || true
-        [ -f "${KERNEL_OUT}/dtbo.img" ] && cp "${KERNEL_OUT}/dtbo.img" AnyKernel3/ || true
-
-        cat > AnyKernel3/anykernel.sh << 'AKEOF'
-# AnyKernel3 config - SM-M146B
-properties() {
-kernel.string=SM-M146B Custom Kernel by MrPankaj24
-do.devicecheck=1
-do.modules=0
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=m14xnsxx
-device.name2=m14xnxx
-device.name3=SM-M146B
-}
-block=/dev/block/by-name/boot;
-is_slot_device=auto;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
-. tools/ak3-core.sh;
-. split_img;
-. repack_img;
-AKEOF
-
-        ZIP_DATE=$(date +"%Y%m%d-%H%M")
-        ZIP_NAME="${DEVICE_MODEL}-${DEVICE_CODENAME}-${ZIP_DATE}.zip"
-        cd AnyKernel3
-        zip -r9 "../${ZIP_NAME}" . -x '*.git*' -x '*placeholder'
-        echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
-        echo "[INFO] Packed: ${ZIP_NAME}"
-
-    # ----------------------------------------------------------
-    # 11. Collect artifacts
-    # ----------------------------------------------------------
-    - name: "🗂️ Collect artifacts"
-      run: |
-        ARTIFACTS_DIR="${{ github.workspace }}/artifacts"
-        mkdir -p "${ARTIFACTS_DIR}"
-        cp "${KERNEL_OUT}/arch/${TARGET_ARCH}/boot/Image" "${ARTIFACTS_DIR}/" || true
-        DTB_PATH="${KERNEL_OUT}/arch/${TARGET_ARCH}/boot/dts/exynos"
-        [ -f "${DTB_PATH}/${TARGET_SOC}.dtb" ] && cp "${DTB_PATH}/${TARGET_SOC}.dtb" "${ARTIFACTS_DIR}/" || true
-        [ -f "${KERNEL_OUT}/dtbo.img" ] && cp "${KERNEL_OUT}/dtbo.img" "${ARTIFACTS_DIR}/" || true
-        [ -f "${KERNEL_OUT}/build.log" ] && cp "${KERNEL_OUT}/build.log" "${ARTIFACTS_DIR}/" || true
-        [ -n "${ZIP_NAME}" ] && [ -f "${{ github.workspace }}/${ZIP_NAME}" ] && \
-          cp "${{ github.workspace }}/${ZIP_NAME}" "${ARTIFACTS_DIR}/" || true
-        ls -lh "${ARTIFACTS_DIR}/"
-
-    # ----------------------------------------------------------
-    # 12. Upload artifacts
-    # ----------------------------------------------------------
-    - name: "⬆️ Upload artifacts"
-      uses: actions/upload-artifact@v4
-      with:
-        name: "kernel-${{ env.DEVICE_MODEL }}-${{ env.DEFCONFIG }}-${{ github.run_number }}"
-        path: ${{ github.workspace }}/artifacts/
-        retention-days: 30
-
-    # ----------------------------------------------------------
-    # 13. Create GitHub Release
-    # ----------------------------------------------------------
-    - name: "🚀 Create GitHub Release"
-      if: github.event_name == 'workflow_dispatch'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: "kernel-${{ env.DEVICE_MODEL }}-${{ github.run_number }}"
-        name: "SM-M146B Kernel Build #${{ github.run_number }}"
-        body: |
-          ## 📱 SM-M146B Custom Kernel
-
-          | Field | Value |
-          |-------|-------|
-          | Device | ${{ env.DEVICE_MODEL }} (${{ env.DEVICE_CODENAME }}) |
-          | SOC | ${{ env.TARGET_SOC }} |
-          | Defconfig | ${{ env.DEFCONFIG }} |
-          | Branch | ${{ env.KERNEL_BRANCH }} |
-          | Commit | ${{ github.sha }} |
-          | Build | #${{ github.run_number }} |
-        files: ${{ github.workspace }}/artifacts/*
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ──────────────────────────────────────────────
+      # 11. Upload build log on failure for debugging
+      # ──────────────────────────────────────────────
+      - name: ⬆️ Upload Build Log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-failure
+          path: /tmp/kernel_build.log
+          if-no-files-found: ignore
+          retention-days: 7
