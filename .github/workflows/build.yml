@@ -1,4 +1,4 @@
-name: 🏗️ Build Kernel (s5e8535 / M14 - Clang 22)
+name: 🏗️ Build Kernel (test s5e8535 / M14 - Clang 22)
 
 on:
   push:
@@ -60,10 +60,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Clone kernel source (kernel_common_modifications)
+      - name: Clone kernel source and update submodules
         run: |
+          # Clone the main repository
           git clone --depth=1 https://github.com/${{ env.KERNEL_REPO_OWNER }}/${{ env.KERNEL_REPO_NAME }}.git kernel_common
-          ls -la kernel_common | sed -n '1,20p' || true
+          
+          # Navigate inside and initialize/download submodules (KernelSU)
+          cd kernel_common
+          git submodule update --init --recursive
+          
+          ls -la | sed -n '1,20p' || true
 
       - name: Setup apt repo for LLVM 22 and install build dependencies
         run: |
