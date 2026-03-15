@@ -2,9 +2,9 @@ name: 🏗️ Build Kernel (s5e8535 / M14 - Clang 22)
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+#    branches: [ main, master ]
+#  pull_request:
+#    branches: [ main, master ]
   workflow_dispatch:
 
 permissions:
@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true" # Clears the Node.js deprecation warning
       KERNEL_REPO_OWNER: MrPankaj24
       KERNEL_REPO_NAME: kernel_common_modifications
       
@@ -74,10 +75,11 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
           
           sudo apt-get update -y
+          # Replaced python3-distutils with python3-setuptools and python-is-python3
           sudo apt-get install -y --no-install-recommends \
             clang-22 llvm-22 lld-22 \
             build-essential make bc libncurses-dev bison flex \
-            python3 python3-distutils git ccache rsync \
+            python3 python3-setuptools python-is-python3 git ccache rsync \
             libssl-dev libelf-dev dwarves device-tree-compiler \
             file gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu sudo \
             lz4 zstd cpio
