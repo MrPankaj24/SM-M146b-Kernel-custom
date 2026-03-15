@@ -1,25 +1,32 @@
-name: Build Kernel (clone kernel_common_modifications then build)
+name: 🏗️ Build Kernel (SUSFS all ReSukiSU s5e8535 / M14 - Clang 22)
 
 on:
+#  push:
+#    branches: [ main, master ]
+#  pull_request:
+#    branches: [ main, master ]
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Clone kernel_common_modifications and build
-    runs-on: ubuntu-22.04
+    name: 🏗️ Build Kernel (s5e8535 / M14)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     env:
-      # The cloned repo will be placed into $GITHUB_WORKSPACE/kernel_common
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       KERNEL_REPO_OWNER: MrPankaj24
       KERNEL_REPO_NAME: kernel_common_modifications
-      KERNEL_CLONE_PATH: ${{ github.workspace }}/kernel_common
+      
+      # ABI & KMI Settings (Matched perfectly to your build.sh)
+      ABI_DEFINITION: ""
+      KMI_SYMBOL_LIST_STRICT_MODE: "0"
+      SKIP_ABI_CHECKS: "1"
+      KMI_ENFORCE: "0"
 
-      # Build env (adapted from test.sh)
+      # Device & Toolchain variables
       DEVICE: m14x
       ARCH: arm64
       SUBARCH: arm64
@@ -35,221 +42,248 @@ jobs:
       ANDROID_MAJOR_VERSION: "t"
       DEPMOD: depmod
 
-      # Workspace mapped paths
+      # --- THE PATH FIX ---
+      # Mapping /root/... to the GitHub Workspace dynamically
       KERNEL_ROOT: ${{ github.workspace }}/kernel_common
       OUTDIR: ${{ github.workspace }}/kernel_common/out
       MODULES_OUTDIR: ${{ github.workspace }}/kernel_common/modules_out
-      FINAL_STAGING: ${{ github.workspace }}/kernel_common/staging
+      FINAL_STAGING: ${{ github.workspace }}/staging
+      # Assuming backups/modules is stored inside the kernel repo
       IN_DLKM: ${{ github.workspace }}/kernel_common/backups/modules
 
       # Cross/clang settings
       CROSS_COMPILE: aarch64-linux-gnu-
-      PATH: /usr/lib/llvm-22/bin:${PATH}
-      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 5G
 
     steps:
-      - name: Checkout this repository (SM-M146B-Kernel-custom)
+      - name: Checkout Workflow Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Clone kernel_common_modifications (git clone)
+      - name: Clone Kernel Source & Inject SukiSU
         run: |
-          # Clone into kernel_common/ using HTTPS (no token required for public repo)
-          git clone https://github.com/${{ env.KERNEL_REPO_OWNER }}/${{ env.KERNEL_REPO_NAME }}.git kernel_common
-          # Show a few files to confirm
-          ls -la kernel_common | sed -n '1,20p' || true
+          # Clone the main kernel repository
+          git clone --depth=1 https://github.com/${{ env.KERNEL_REPO_OWNER }}/${{ env.KERNEL_REPO_NAME }}.git kernel_common
+          
+          cd kernel_common
+          
+          # Remove the empty/broken KernelSU folder if git created a placeholder
+          rm -rf KernelSU
+          
+          # Clone SukiSU-Ultra directly to satisfy the symlink
+          echo "Cloning ReSukiSU..."
+          git clone https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+          
+          ls -la | sed -n '1,20p' || true
 
-      - name: Setup apt repo for LLVM 22 and install build dependencies
+      - name: Setup LLVM 22 and Install Dependencies
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          # Add LLVM apt repo for clang-22
+          
+          # Add LLVM apt repo for clang-22 on Ubuntu 24.04
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          
           sudo apt-get update -y
+          # Installed python3-setuptools for modern Ubuntu compatibility
           sudo apt-get install -y --no-install-recommends \
             clang-22 llvm-22 lld-22 \
             build-essential make bc libncurses-dev bison flex \
-            python3 python3-distutils git ccache rsync \
+            python3 python3-setuptools python-is-python3 git ccache rsync \
             libssl-dev libelf-dev dwarves device-tree-compiler \
-            file gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu sudo
-          # Prepare ccache
+            file gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu sudo \
+            lz4 zstd cpio
+            
           mkdir -p "${CCACHE_DIR}"
           ccache -M "${CCACHE_MAXSIZE}" || true
-          # Ensure clang-22 symlink exists for convenience
+          
           sudo ln -sf /usr/bin/clang-22 /usr/bin/clang || true
           sudo ln -sf /usr/bin/clang++-22 /usr/bin/clang++ || true
 
-      - name: Cache ccache
+      - name: Cache Compiler Output (ccache)
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-${{ hashFiles('.github/workflows/main.yml') }}-${{ github.sha }}
+          key: ${{ runner.os }}-ccache-${{ hashFiles('.github/workflows/build.yml') }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-ccache-
 
-      - name: Cache kernel out & modules_out
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.OUTDIR }}
-            ${{ env.MODULES_OUTDIR }}
-          key: ${{ runner.os }}-kernel-out-${{ hashFiles('kernel_common/**') }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-kernel-out-
-
-      - name: Prepare workspace directories & placeholder modules.load
+      - name: Prepare Workspace Directories
         run: |
           set -euo pipefail
+          echo "Cleaning old build artifacts..."
+          rm -rf "${OUTDIR}" "${MODULES_OUTDIR}" "${FINAL_STAGING}"
+          
+          # Creating identical structure to local build.sh
           mkdir -p "${OUTDIR}"
           mkdir -p "${MODULES_OUTDIR}"
           mkdir -p "${FINAL_STAGING}/lib/modules/0.0"
           mkdir -p "${IN_DLKM}"
-          # create placeholder modules.load if not present
+          
+          # Failsafe in case modules.load isn't in the repo yet
           if [ ! -f "${IN_DLKM}/modules.load" ]; then
             echo "# placeholder modules.load" > "${IN_DLKM}/modules.load"
           fi
 
-      - name: Print versions and env
+      - name: Inject Custom Kernel Name (custom.config)
         run: |
           set -euo pipefail
-          echo "KERNEL_ROOT=${KERNEL_ROOT}"
-          echo "OUTDIR=${OUTDIR}"
-          echo "MODULES_OUTDIR=${MODULES_OUTDIR}"
-          clang-22 --version || true
-          aarch64-linux-gnu-gcc --version || true
-          lld-22 --version || true
-          ccache --version || true
+          cd "${KERNEL_ROOT}"
+          
+          echo "Finding custom.config to update kernel name..."
+          CONFIG_FILE=$(find . -name "custom.config" | head -n 1)
+          
+          if [ -n "$CONFIG_FILE" ]; then
+            # Replaces the @prisma localversion with -MrPankaj24
+            sed -i 's/CONFIG_LOCALVERSION=".*/CONFIG_LOCALVERSION="-MrPankaj24"/g' "$CONFIG_FILE"
+            
+            # Replaces the pdroid hostname with mrpankaj24
+            sed -i 's/#CONFIG_DEFAULT_HOSTNAME=".*/#CONFIG_DEFAULT_HOSTNAME="mrpankaj24"/g' "$CONFIG_FILE"
+            
+            echo "Successfully updated kernel name in $CONFIG_FILE. New values:"
+            grep -E "CONFIG_LOCALVERSION|CONFIG_DEFAULT_HOSTNAME" "$CONFIG_FILE"
+          else
+            echo "WARNING: custom.config not found!"
+          fi    
 
-      - name: Kernel: Generate config (DEVICE_defconfig + fragments)
+      - name: Enable SUSFS Features (su.config)
         run: |
           set -euo pipefail
-          export O="${OUTDIR}"
-          export ARCH=${ARCH}
-          export SUBARCH=${SUBARCH}
-          export CROSS_COMPILE=${CROSS_COMPILE}
-          export PATH=/usr/lib/llvm-22/bin:$PATH
-          export CC="${CC}"
-          export HOSTCC="${HOSTCC}"
-          # Run config generation inside the cloned kernel_common directory:
-          (cd "${KERNEL_ROOT}" && make -j$(nproc) O="${O}" ${DEVICE}_defconfig su.config) 2>&1 | tee build_generate_config.log
+          cd "${KERNEL_ROOT}"
+          
+          echo "Finding su.config to enable SUSFS features..."
+          CONFIG_FILE=$(find . -name "su.config" | head -n 1)
+          
+          if [ -n "$CONFIG_FILE" ]; then
+            echo "su.config found at $CONFIG_FILE. Applying SUSFS configs..."
+            
+            # Use sed to find any existing state (even if commented out) and force it to =y
+            sed -i 's/.*CONFIG_KSU_SUSFS.*/CONFIG_KSU_SUSFS=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_SUS_OVERLAYFS.*/CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_SUS_MAP.*/CONFIG_KSU_SUSFS_SUS_MAP=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_SUS_PATH.*/CONFIG_KSU_SUSFS_SUS_PATH=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_SUS_MOUNT.*/CONFIG_KSU_SUSFS_SUS_MOUNT=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_SUS_KSTAT.*/CONFIG_KSU_SUSFS_SUS_KSTAT=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT.*/CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT.*/CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_TRY_UMOUNT.*/CONFIG_KSU_SUSFS_TRY_UMOUNT=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT.*/CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_SPOOF_UNAME.*/CONFIG_KSU_SUSFS_SPOOF_UNAME=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_ENABLE_LOG.*/CONFIG_KSU_SUSFS_ENABLE_LOG=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS.*/CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG.*/CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y/g' "$CONFIG_FILE"
+            sed -i 's/.*CONFIG_KSU_SUSFS_OPEN_REDIRECT.*/CONFIG_KSU_SUSFS_OPEN_REDIRECT=y/g' "$CONFIG_FILE"
+            
+            echo "Successfully enabled all SUSFS features in $CONFIG_FILE."
+          else
+            echo "WARNING: su.config not found! SUSFS features were not modified."
+          fi   
 
-      - name: Kernel: prepare (minimal)
+      - name: Step A - Generate Config
         run: |
           set -euo pipefail
-          export O="${OUTDIR}"
-          export ARCH=${ARCH}
-          export SUBARCH=${SUBARCH}
-          export CROSS_COMPILE=${CROSS_COMPILE}
           export PATH=/usr/lib/llvm-22/bin:$PATH
-          export CC="${CC}" HOSTCC="${HOSTCC}"
-          (cd "${KERNEL_ROOT}" && make -j4 prepare O="${O}") 2>&1 | tee -a build_generate_config.log
+          
+          echo "===================================================="
+          echo "Configuring and Building for ${DEVICE}..."
+          echo "===================================================="
+          
+          cd "${KERNEL_ROOT}"
+          make -j$(nproc --all) O="${OUTDIR}" ${DEVICE}_defconfig su.config perf.config custom.config 2>&1 | tee build_generate_config.log
 
-      - name: Kernel: build (full)
+      - name: Step B - Prepare
         run: |
           set -euo pipefail
-          export O="${OUTDIR}"
-          export ARCH=${ARCH}
-          export SUBARCH=${SUBARCH}
-          export CROSS_COMPILE=${CROSS_COMPILE}
           export PATH=/usr/lib/llvm-22/bin:$PATH
-          export CC="${CC}" HOSTCC="${HOSTCC}"
+          
+          cd "${KERNEL_ROOT}"
+          make -j4 prepare O="${OUTDIR}" 2>&1 | tee -a build_generate_config.log
+
+      - name: Step B - Compile Kernel Image
+        run: |
+          set -euo pipefail
+          export PATH=/usr/lib/llvm-22/bin:$PATH
           export LD=ld.lld
-          (cd "${KERNEL_ROOT}" && make -j$(nproc) O="${O}") 2>&1 | tee build.log
+          
+          cd "${KERNEL_ROOT}"
+          make -j$(nproc --all) O="${OUTDIR}" 2>&1 | tee build.log
 
-      - name: Install and strip modules to modules_out
+      - name: Step C - Install & Strip Modules
         run: |
           set -euo pipefail
-          export O="${OUTDIR}"
-          export MODULES_OUTDIR="${MODULES_OUTDIR}"
-          export CROSS_COMPILE=${CROSS_COMPILE}
           export PATH=/usr/lib/llvm-22/bin:$PATH
-          export CC="${CC}" HOSTCC="${HOSTCC}"
-          (cd "${KERNEL_ROOT}" && make -j$(nproc) O="${O}" \
+          export LD=ld.lld
+          
+          cd "${KERNEL_ROOT}"
+          echo "Installing and stripping modules to modules_out..."
+          make -j$(nproc --all) O="${OUTDIR}" \
             INSTALL_MOD_STRIP="--strip-debug --keep-section=.ARM.attributes" \
             INSTALL_MOD_PATH="${MODULES_OUTDIR}" \
-            modules_install) 2>&1 | tee -a build.log || true
+            modules_install 2>&1 | tee -a build.log || true
 
-      - name: Copy metadata for depmod into staging
+      - name: Module Filtering & Dependency Logic
         run: |
           set -euo pipefail
-          mkdir -p "${FINAL_STAGING}/lib/modules/0.0"
-          for f in modules.builtin modules.order; do
-            src=$(find "${MODULES_OUTDIR}/lib/modules" -type f -name "$f" | head -n1 || true)
-            if [ -n "$src" ]; then
-              cp "$src" "${FINAL_STAGING}/lib/modules/0.0/$f"
-            else
-              echo "warning: $f not found under ${MODULES_OUTDIR}/lib/modules" | tee -a build.log
-            fi
-          done
+          
+          echo "Copying metadata for depmod..."
+          
+          find "${MODULES_OUTDIR}/lib/modules" -type f -name "modules.builtin" -exec cp {} "${FINAL_STAGING}/lib/modules/0.0/" \; || true
+          find "${MODULES_OUTDIR}/lib/modules" -type f -name "modules.order" -exec cp {} "${FINAL_STAGING}/lib/modules/0.0/" \; || true
+          
           if [ -f "${IN_DLKM}/modules.load" ]; then
             cp "${IN_DLKM}/modules.load" "${FINAL_STAGING}/lib/modules/0.0/modules.load"
           fi
 
-      - name: Optional: Generate modules.dep with depmod (non-fatal)
-        run: |
-          set -euo pipefail
-          if [ -f "${OUTDIR}/System.map" ]; then
-            echo "Running depmod into staging..." | tee -a build.log
-            sudo ${DEPMOD} -b "${FINAL_STAGING}" -F "${OUTDIR}/System.map" 0.0 2>&1 | tee -a build.log || true
-          else
-            echo "System.map not found; skipping depmod" | tee -a build.log
-          fi
-
-      - name: Copy kernel Image and System.map to workspace
-        run: |
-          set -euo pipefail
-          if [ -f "${OUTDIR}/arch/arm64/boot/Image" ]; then
-            cp "${OUTDIR}/arch/arm64/boot/Image" "${GITHUB_WORKSPACE}/Image"
-            echo "Kernel image copied to ${GITHUB_WORKSPACE}/Image" | tee -a build.log
-          else
-            echo "WARNING: Image not found at ${OUTDIR}/arch/arm64/boot/Image" | tee -a build.log
-            ls -la "${OUTDIR}/arch/arm64/boot" || true
-          fi
-          if [ -f "${OUTDIR}/System.map" ]; then
-            cp "${OUTDIR}/System.map" "${GITHUB_WORKSPACE}/System.map"
-          fi
-
-      - name: Verify modules listed in modules.load are present (like test.sh check)
-        run: |
-          set -euo pipefail
+          echo "Filtering modules based on OEM modules.load..."
           missing_modules=""
+          
           while read -r module; do
             [ -z "$module" ] && continue
-            found=$(find "${MODULES_OUTDIR}/lib/modules" -name "$module" -type f | head -n1 || true)
+            [[ "$module" =~ ^#.*$ ]] && continue
+            
+            found=$(find "${MODULES_OUTDIR}/lib/modules" -name "$module" -type f | head -n 1 || true)
             if [ -f "$found" ]; then
               echo "FOUND: $module -> $found"
             else
               missing_modules="${missing_modules} $module"
             fi
           done < "${IN_DLKM}/modules.load"
+
           if [ -n "$missing_modules" ]; then
             echo "WARNING: The following modules from modules.load were not found:$missing_modules" | tee -a build.log
           fi
 
-      - name: Package artifacts (Image, System.map, modules_out, staging, logs)
+      - name: Finalizing Output & Packaging
         run: |
           set -euo pipefail
-          mkdir -p artifacts
-          if [ -f "${GITHUB_WORKSPACE}/Image" ]; then
-            cp "${GITHUB_WORKSPACE}/Image" artifacts/Image
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+          
+          if [ -f "${OUTDIR}/arch/arm64/boot/Image" ]; then
+            cp "${OUTDIR}/arch/arm64/boot/Image" "${GITHUB_WORKSPACE}/artifacts/Image"
+            echo -e "\n\033[1;32m====================================================\033[0m"
+            echo -e "\033[1;32mBUILD SUCCESSFUL!\033[0m"
+            echo -e "Kernel Image copied to artifacts directory"
+            echo -e "\033[1;32m====================================================\033[0m"
+          else
+            echo "WARNING: Image not found at ${OUTDIR}/arch/arm64/boot/Image"
+            exit 1
           fi
-          if [ -f "${GITHUB_WORKSPACE}/System.map" ]; then
-            cp "${GITHUB_WORKSPACE}/System.map" artifacts/System.map
-          fi
+
           if [ -d "${MODULES_OUTDIR}/lib" ]; then
-            tar -C "${MODULES_OUTDIR}" -czf artifacts/modules_out.tgz lib
+            tar -C "${MODULES_OUTDIR}" -czf "${GITHUB_WORKSPACE}/artifacts/modules_out.tgz" lib
           fi
           if [ -d "${FINAL_STAGING}" ]; then
-            tar -C "${FINAL_STAGING}" -czf artifacts/staging.tgz .
+            tar -C "${FINAL_STAGING}" -czf "${GITHUB_WORKSPACE}/artifacts/staging.tgz" .
           fi
-          cp build.log artifacts/build.log || true
-          cp build_generate_config.log artifacts/build_generate_config.log || true
 
-      - name: Upload build artifacts
+          cp "${KERNEL_ROOT}/build.log" "${GITHUB_WORKSPACE}/artifacts/build.log" || true
+          cp "${KERNEL_ROOT}/build_generate_config.log" "${GITHUB_WORKSPACE}/artifacts/build_generate_config.log" || true
+
+      - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build-artifacts
-          path: artifacts
+          name: m14x-kernel-build
+          path: ${{ github.workspace }}/artifacts/*
