@@ -1,10 +1,10 @@
-name: 🏗️ Build Kernel (test s5e8535 / M14 - Clang 22)
+name: 🏗️ Build Kernel (s5e8535 / M14 - Clang 22)
 
 on:
   push:
-#    branches: [ main, master ]
-#  pull_request:
-#    branches: [ main, master ]
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
 
 permissions:
@@ -16,11 +16,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true" # Clears the Node.js deprecation warning
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       KERNEL_REPO_OWNER: MrPankaj24
       KERNEL_REPO_NAME: kernel_common_modifications
       
-      # ABI & KMI Settings (Nuke checks)
+      # ABI & KMI Settings (Matched perfectly to your build.sh)
       ABI_DEFINITION: ""
       KMI_SYMBOL_LIST_STRICT_MODE: "0"
       SKIP_ABI_CHECKS: "1"
@@ -42,11 +42,13 @@ jobs:
       ANDROID_MAJOR_VERSION: "t"
       DEPMOD: depmod
 
-      # Internal Paths mapped to GitHub Workspace
+      # --- THE PATH FIX ---
+      # Mapping /root/... to the GitHub Workspace dynamically
       KERNEL_ROOT: ${{ github.workspace }}/kernel_common
       OUTDIR: ${{ github.workspace }}/kernel_common/out
       MODULES_OUTDIR: ${{ github.workspace }}/kernel_common/modules_out
       FINAL_STAGING: ${{ github.workspace }}/staging
+      # Assuming backups/modules is stored inside the kernel repo
       IN_DLKM: ${{ github.workspace }}/kernel_common/backups/modules
 
       # Cross/clang settings
@@ -55,33 +57,33 @@ jobs:
       CCACHE_MAXSIZE: 5G
 
     steps:
-      - name: Checkout this repository
+      - name: Checkout Workflow Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Clone kernel source and update submodules
+      - name: Clone Kernel Source & Initialize Submodules (KernelSU Fix)
         run: |
-          # Clone the main repository
+          # Clone the main kernel repository
           git clone --depth=1 https://github.com/${{ env.KERNEL_REPO_OWNER }}/${{ env.KERNEL_REPO_NAME }}.git kernel_common
           
-          # Navigate inside and initialize/download submodules (KernelSU)
+          # Navigate inside and pull down submodule source code (fixes drivers/kernelsu/Kconfig missing error)
           cd kernel_common
           git submodule update --init --recursive
           
           ls -la | sed -n '1,20p' || true
 
-      - name: Setup apt repo for LLVM 22 and install build dependencies
+      - name: Setup LLVM 22 and Install Dependencies
         run: |
           set -euo pipefail
           sudo apt-get update -y
           
-          # Add LLVM apt repo for clang-22 (Ubuntu 24.04 "noble")
+          # Add LLVM apt repo for clang-22 on Ubuntu 24.04
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
           
           sudo apt-get update -y
-          # Replaced python3-distutils with python3-setuptools and python-is-python3
+          # Installed python3-setuptools for modern Ubuntu compatibility
           sudo apt-get install -y --no-install-recommends \
             clang-22 llvm-22 lld-22 \
             build-essential make bc libncurses-dev bison flex \
@@ -90,15 +92,13 @@ jobs:
             file gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu sudo \
             lz4 zstd cpio
             
-          # Prepare ccache
           mkdir -p "${CCACHE_DIR}"
           ccache -M "${CCACHE_MAXSIZE}" || true
           
-          # Ensure clang-22 symlink exists
           sudo ln -sf /usr/bin/clang-22 /usr/bin/clang || true
           sudo ln -sf /usr/bin/clang++-22 /usr/bin/clang++ || true
 
-      - name: Cache ccache
+      - name: Cache Compiler Output (ccache)
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
@@ -106,22 +106,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-ccache-
 
-      - name: Prepare workspace directories
+      - name: Prepare Workspace Directories
         run: |
           set -euo pipefail
           echo "Cleaning old build artifacts..."
           rm -rf "${OUTDIR}" "${MODULES_OUTDIR}" "${FINAL_STAGING}"
+          
+          # Creating identical structure to local build.sh
           mkdir -p "${OUTDIR}"
           mkdir -p "${MODULES_OUTDIR}"
           mkdir -p "${FINAL_STAGING}/lib/modules/0.0"
           mkdir -p "${IN_DLKM}"
           
-          # Create placeholder modules.load if missing so build doesn't crash on read
+          # Failsafe in case modules.load isn't in the repo yet
           if [ ! -f "${IN_DLKM}/modules.load" ]; then
             echo "# placeholder modules.load" > "${IN_DLKM}/modules.load"
           fi
 
-      - name: Kernel Compilation - Generate Config
+      - name: Step A - Generate Config
         run: |
           set -euo pipefail
           export PATH=/usr/lib/llvm-22/bin:$PATH
@@ -133,7 +135,7 @@ jobs:
           cd "${KERNEL_ROOT}"
           make -j$(nproc --all) O="${OUTDIR}" ${DEVICE}_defconfig su.config perf.config custom.config 2>&1 | tee build_generate_config.log
 
-      - name: Kernel Compilation - Prepare
+      - name: Step B - Prepare
         run: |
           set -euo pipefail
           export PATH=/usr/lib/llvm-22/bin:$PATH
@@ -141,7 +143,7 @@ jobs:
           cd "${KERNEL_ROOT}"
           make -j4 prepare O="${OUTDIR}" 2>&1 | tee -a build_generate_config.log
 
-      - name: Kernel Compilation - Build Kernel Image
+      - name: Step B - Compile Kernel Image
         run: |
           set -euo pipefail
           export PATH=/usr/lib/llvm-22/bin:$PATH
@@ -150,7 +152,7 @@ jobs:
           cd "${KERNEL_ROOT}"
           make -j$(nproc --all) O="${OUTDIR}" 2>&1 | tee build.log
 
-      - name: Kernel Compilation - Install & Strip Modules
+      - name: Step C - Install & Strip Modules
         run: |
           set -euo pipefail
           export PATH=/usr/lib/llvm-22/bin:$PATH
@@ -168,9 +170,7 @@ jobs:
           set -euo pipefail
           
           echo "Copying metadata for depmod..."
-          mkdir -p "${FINAL_STAGING}/lib/modules/0.0"
           
-          # Copy essential metadata FIRST so depmod can see them
           find "${MODULES_OUTDIR}/lib/modules" -type f -name "modules.builtin" -exec cp {} "${FINAL_STAGING}/lib/modules/0.0/" \; || true
           find "${MODULES_OUTDIR}/lib/modules" -type f -name "modules.order" -exec cp {} "${FINAL_STAGING}/lib/modules/0.0/" \; || true
           
@@ -183,7 +183,7 @@ jobs:
           
           while read -r module; do
             [ -z "$module" ] && continue
-            [[ "$module" =~ ^#.*$ ]] && continue # Skip comments
+            [[ "$module" =~ ^#.*$ ]] && continue
             
             found=$(find "${MODULES_OUTDIR}/lib/modules" -name "$module" -type f | head -n 1 || true)
             if [ -f "$found" ]; then
@@ -197,7 +197,7 @@ jobs:
             echo "WARNING: The following modules from modules.load were not found:$missing_modules" | tee -a build.log
           fi
 
-      - name: Finalizing Output
+      - name: Finalizing Output & Packaging
         run: |
           set -euo pipefail
           mkdir -p "${GITHUB_WORKSPACE}/artifacts"
@@ -210,11 +210,9 @@ jobs:
             echo -e "\033[1;32m====================================================\033[0m"
           else
             echo "WARNING: Image not found at ${OUTDIR}/arch/arm64/boot/Image"
-            ls -la "${OUTDIR}/arch/arm64/boot/" || true
             exit 1
           fi
 
-          # Collect staging and modules_out
           if [ -d "${MODULES_OUTDIR}/lib" ]; then
             tar -C "${MODULES_OUTDIR}" -czf "${GITHUB_WORKSPACE}/artifacts/modules_out.tgz" lib
           fi
@@ -225,8 +223,8 @@ jobs:
           cp "${KERNEL_ROOT}/build.log" "${GITHUB_WORKSPACE}/artifacts/build.log" || true
           cp "${KERNEL_ROOT}/build_generate_config.log" "${GITHUB_WORKSPACE}/artifacts/build_generate_config.log" || true
 
-      - name: Upload build artifacts
+      - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build-artifacts
+          name: m14x-kernel-build
           path: ${{ github.workspace }}/artifacts/*
