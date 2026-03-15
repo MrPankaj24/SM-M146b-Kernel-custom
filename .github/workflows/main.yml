@@ -182,6 +182,32 @@ jobs:
             echo "WARNING: su.config not found! SUSFS features were not modified."
           fi   
 
+      - name: Inject KALLSYMS_ALL for Inline Hooking
+        run: |
+          set -euo pipefail
+          cd "${KERNEL_ROOT}"
+          
+          echo "Finding configuration file..."
+          # Change "su.config" to your actual defconfig name if you are placing these directly in the defconfig
+          CONFIG_FILE=$(find . -name "su.config" | head -n 1)
+          
+          if [ -n "$CONFIG_FILE" ]; then
+            echo "Injecting CONFIG_KALLSYMS_ALL=y into $CONFIG_FILE..."
+            
+            if grep -q "CONFIG_KALLSYMS_ALL" "$CONFIG_FILE"; then
+              # Replace it if it's already there but set to =n or commented out
+              sed -i 's/.*CONFIG_KALLSYMS_ALL.*/CONFIG_KALLSYMS_ALL=y/g' "$CONFIG_FILE"
+            else
+              # Append it to the very end if it doesn't exist at all
+              echo "CONFIG_KALLSYMS_ALL=y" >> "$CONFIG_FILE"
+            fi
+            
+            echo "Successfully injected!"
+            grep "CONFIG_KALLSYMS_ALL" "$CONFIG_FILE"
+          else
+            echo "WARNING: Configuration file not found!"
+          fi    
+
       - name: Step A - Generate Config
         run: |
           set -euo pipefail
