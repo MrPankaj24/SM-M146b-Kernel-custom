@@ -128,6 +128,27 @@ jobs:
             echo "# placeholder modules.load" > "${IN_DLKM}/modules.load"
           fi
 
+      - name: Inject Custom Kernel Name (custom.config)
+        run: |
+          set -euo pipefail
+          cd "${KERNEL_ROOT}"
+          
+          echo "Finding custom.config to update kernel name..."
+          CONFIG_FILE=$(find . -name "custom.config" | head -n 1)
+          
+          if [ -n "$CONFIG_FILE" ]; then
+            # Replaces the @prisma localversion with -MrPankaj24
+            sed -i 's/CONFIG_LOCALVERSION=".*/CONFIG_LOCALVERSION="-MrPankaj24"/g' "$CONFIG_FILE"
+            
+            # Replaces the pdroid hostname with mrpankaj24
+            sed -i 's/#CONFIG_DEFAULT_HOSTNAME=".*/#CONFIG_DEFAULT_HOSTNAME="mrpankaj24"/g' "$CONFIG_FILE"
+            
+            echo "Successfully updated kernel name in $CONFIG_FILE. New values:"
+            grep -E "CONFIG_LOCALVERSION|CONFIG_DEFAULT_HOSTNAME" "$CONFIG_FILE"
+          else
+            echo "WARNING: custom.config not found!"
+          fi    
+
       - name: Step A - Generate Config
         run: |
           set -euo pipefail
