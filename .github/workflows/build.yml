@@ -1,0 +1,255 @@
+name: Build Kernel (clone kernel_common_modifications then build)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Clone kernel_common_modifications and build
+    runs-on: ubuntu-22.04
+    env:
+      # The cloned repo will be placed into $GITHUB_WORKSPACE/kernel_common
+      KERNEL_REPO_OWNER: MrPankaj24
+      KERNEL_REPO_NAME: kernel_common_modifications
+      KERNEL_CLONE_PATH: ${{ github.workspace }}/kernel_common
+
+      # Build env (adapted from test.sh)
+      DEVICE: m14x
+      ARCH: arm64
+      SUBARCH: arm64
+      CC: "ccache clang-22"
+      HOSTCC: "ccache clang-22"
+      LLVM: "1"
+      LTO: thin
+      LLVM_IAS: "1"
+      TARGET_SOC: s5e8535
+      SOC_NAME: s5e8535
+      DTC_FLAGS: "-@"
+      PLATFORM_VERSION: "15"
+      ANDROID_MAJOR_VERSION: "t"
+      DEPMOD: depmod
+
+      # Workspace mapped paths
+      KERNEL_ROOT: ${{ github.workspace }}/kernel_common
+      OUTDIR: ${{ github.workspace }}/kernel_common/out
+      MODULES_OUTDIR: ${{ github.workspace }}/kernel_common/modules_out
+      FINAL_STAGING: ${{ github.workspace }}/kernel_common/staging
+      IN_DLKM: ${{ github.workspace }}/kernel_common/backups/modules
+
+      # Cross/clang settings
+      CROSS_COMPILE: aarch64-linux-gnu-
+      PATH: /usr/lib/llvm-22/bin:${PATH}
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_MAXSIZE: 5G
+
+    steps:
+      - name: Checkout this repository (SM-M146B-Kernel-custom)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone kernel_common_modifications (git clone)
+        run: |
+          # Clone into kernel_common/ using HTTPS (no token required for public repo)
+          git clone https://github.com/${{ env.KERNEL_REPO_OWNER }}/${{ env.KERNEL_REPO_NAME }}.git kernel_common
+          # Show a few files to confirm
+          ls -la kernel_common | sed -n '1,20p' || true
+
+      - name: Setup apt repo for LLVM 22 and install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          # Add LLVM apt repo for clang-22
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            clang-22 llvm-22 lld-22 \
+            build-essential make bc libncurses-dev bison flex \
+            python3 python3-distutils git ccache rsync \
+            libssl-dev libelf-dev dwarves device-tree-compiler \
+            file gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu sudo
+          # Prepare ccache
+          mkdir -p "${CCACHE_DIR}"
+          ccache -M "${CCACHE_MAXSIZE}" || true
+          # Ensure clang-22 symlink exists for convenience
+          sudo ln -sf /usr/bin/clang-22 /usr/bin/clang || true
+          sudo ln -sf /usr/bin/clang++-22 /usr/bin/clang++ || true
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-ccache-${{ hashFiles('.github/workflows/main.yml') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Cache kernel out & modules_out
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.OUTDIR }}
+            ${{ env.MODULES_OUTDIR }}
+          key: ${{ runner.os }}-kernel-out-${{ hashFiles('kernel_common/**') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-out-
+
+      - name: Prepare workspace directories & placeholder modules.load
+        run: |
+          set -euo pipefail
+          mkdir -p "${OUTDIR}"
+          mkdir -p "${MODULES_OUTDIR}"
+          mkdir -p "${FINAL_STAGING}/lib/modules/0.0"
+          mkdir -p "${IN_DLKM}"
+          # create placeholder modules.load if not present
+          if [ ! -f "${IN_DLKM}/modules.load" ]; then
+            echo "# placeholder modules.load" > "${IN_DLKM}/modules.load"
+          fi
+
+      - name: Print versions and env
+        run: |
+          set -euo pipefail
+          echo "KERNEL_ROOT=${KERNEL_ROOT}"
+          echo "OUTDIR=${OUTDIR}"
+          echo "MODULES_OUTDIR=${MODULES_OUTDIR}"
+          clang-22 --version || true
+          aarch64-linux-gnu-gcc --version || true
+          lld-22 --version || true
+          ccache --version || true
+
+      - name: Kernel: Generate config (DEVICE_defconfig + fragments)
+        run: |
+          set -euo pipefail
+          export O="${OUTDIR}"
+          export ARCH=${ARCH}
+          export SUBARCH=${SUBARCH}
+          export CROSS_COMPILE=${CROSS_COMPILE}
+          export PATH=/usr/lib/llvm-22/bin:$PATH
+          export CC="${CC}"
+          export HOSTCC="${HOSTCC}"
+          # Run config generation inside the cloned kernel_common directory:
+          (cd "${KERNEL_ROOT}" && make -j$(nproc) O="${O}" ${DEVICE}_defconfig su.config) 2>&1 | tee build_generate_config.log
+
+      - name: Kernel: prepare (minimal)
+        run: |
+          set -euo pipefail
+          export O="${OUTDIR}"
+          export ARCH=${ARCH}
+          export SUBARCH=${SUBARCH}
+          export CROSS_COMPILE=${CROSS_COMPILE}
+          export PATH=/usr/lib/llvm-22/bin:$PATH
+          export CC="${CC}" HOSTCC="${HOSTCC}"
+          (cd "${KERNEL_ROOT}" && make -j4 prepare O="${O}") 2>&1 | tee -a build_generate_config.log
+
+      - name: Kernel: build (full)
+        run: |
+          set -euo pipefail
+          export O="${OUTDIR}"
+          export ARCH=${ARCH}
+          export SUBARCH=${SUBARCH}
+          export CROSS_COMPILE=${CROSS_COMPILE}
+          export PATH=/usr/lib/llvm-22/bin:$PATH
+          export CC="${CC}" HOSTCC="${HOSTCC}"
+          export LD=ld.lld
+          (cd "${KERNEL_ROOT}" && make -j$(nproc) O="${O}") 2>&1 | tee build.log
+
+      - name: Install and strip modules to modules_out
+        run: |
+          set -euo pipefail
+          export O="${OUTDIR}"
+          export MODULES_OUTDIR="${MODULES_OUTDIR}"
+          export CROSS_COMPILE=${CROSS_COMPILE}
+          export PATH=/usr/lib/llvm-22/bin:$PATH
+          export CC="${CC}" HOSTCC="${HOSTCC}"
+          (cd "${KERNEL_ROOT}" && make -j$(nproc) O="${O}" \
+            INSTALL_MOD_STRIP="--strip-debug --keep-section=.ARM.attributes" \
+            INSTALL_MOD_PATH="${MODULES_OUTDIR}" \
+            modules_install) 2>&1 | tee -a build.log || true
+
+      - name: Copy metadata for depmod into staging
+        run: |
+          set -euo pipefail
+          mkdir -p "${FINAL_STAGING}/lib/modules/0.0"
+          for f in modules.builtin modules.order; do
+            src=$(find "${MODULES_OUTDIR}/lib/modules" -type f -name "$f" | head -n1 || true)
+            if [ -n "$src" ]; then
+              cp "$src" "${FINAL_STAGING}/lib/modules/0.0/$f"
+            else
+              echo "warning: $f not found under ${MODULES_OUTDIR}/lib/modules" | tee -a build.log
+            fi
+          done
+          if [ -f "${IN_DLKM}/modules.load" ]; then
+            cp "${IN_DLKM}/modules.load" "${FINAL_STAGING}/lib/modules/0.0/modules.load"
+          fi
+
+      - name: Optional: Generate modules.dep with depmod (non-fatal)
+        run: |
+          set -euo pipefail
+          if [ -f "${OUTDIR}/System.map" ]; then
+            echo "Running depmod into staging..." | tee -a build.log
+            sudo ${DEPMOD} -b "${FINAL_STAGING}" -F "${OUTDIR}/System.map" 0.0 2>&1 | tee -a build.log || true
+          else
+            echo "System.map not found; skipping depmod" | tee -a build.log
+          fi
+
+      - name: Copy kernel Image and System.map to workspace
+        run: |
+          set -euo pipefail
+          if [ -f "${OUTDIR}/arch/arm64/boot/Image" ]; then
+            cp "${OUTDIR}/arch/arm64/boot/Image" "${GITHUB_WORKSPACE}/Image"
+            echo "Kernel image copied to ${GITHUB_WORKSPACE}/Image" | tee -a build.log
+          else
+            echo "WARNING: Image not found at ${OUTDIR}/arch/arm64/boot/Image" | tee -a build.log
+            ls -la "${OUTDIR}/arch/arm64/boot" || true
+          fi
+          if [ -f "${OUTDIR}/System.map" ]; then
+            cp "${OUTDIR}/System.map" "${GITHUB_WORKSPACE}/System.map"
+          fi
+
+      - name: Verify modules listed in modules.load are present (like test.sh check)
+        run: |
+          set -euo pipefail
+          missing_modules=""
+          while read -r module; do
+            [ -z "$module" ] && continue
+            found=$(find "${MODULES_OUTDIR}/lib/modules" -name "$module" -type f | head -n1 || true)
+            if [ -f "$found" ]; then
+              echo "FOUND: $module -> $found"
+            else
+              missing_modules="${missing_modules} $module"
+            fi
+          done < "${IN_DLKM}/modules.load"
+          if [ -n "$missing_modules" ]; then
+            echo "WARNING: The following modules from modules.load were not found:$missing_modules" | tee -a build.log
+          fi
+
+      - name: Package artifacts (Image, System.map, modules_out, staging, logs)
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          if [ -f "${GITHUB_WORKSPACE}/Image" ]; then
+            cp "${GITHUB_WORKSPACE}/Image" artifacts/Image
+          fi
+          if [ -f "${GITHUB_WORKSPACE}/System.map" ]; then
+            cp "${GITHUB_WORKSPACE}/System.map" artifacts/System.map
+          fi
+          if [ -d "${MODULES_OUTDIR}/lib" ]; then
+            tar -C "${MODULES_OUTDIR}" -czf artifacts/modules_out.tgz lib
+          fi
+          if [ -d "${FINAL_STAGING}" ]; then
+            tar -C "${FINAL_STAGING}" -czf artifacts/staging.tgz .
+          fi
+          cp build.log artifacts/build.log || true
+          cp build_generate_config.log artifacts/build_generate_config.log || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-artifacts
+          path: artifacts
