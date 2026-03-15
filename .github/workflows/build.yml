@@ -62,14 +62,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Clone Kernel Source & Initialize Submodules (KernelSU Fix)
+      - name: Clone Kernel Source & Inject SukiSU
         run: |
           # Clone the main kernel repository
           git clone --depth=1 https://github.com/${{ env.KERNEL_REPO_OWNER }}/${{ env.KERNEL_REPO_NAME }}.git kernel_common
           
-          # Navigate inside and pull down submodule source code (fixes drivers/kernelsu/Kconfig missing error)
           cd kernel_common
-          git submodule update --init --recursive
+          
+          # Remove the empty/broken KernelSU folder if git created a placeholder
+          rm -rf KernelSU
+          
+          # Clone SukiSU-Ultra directly to satisfy the symlink
+          echo "Cloning SukiSU-Ultra..."
+          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
           
           ls -la | sed -n '1,20p' || true
 
