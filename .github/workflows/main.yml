@@ -1,186 +1,258 @@
-name: Samsung M14 Custom Kernel
+name: Build Kernel (clone kernel_common_modifications then build)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    name: Build GKI 5.15 with Samsung USB
-    runs-on: ubuntu-latest
+    name: Clone kernel_common_modifications and build
+    runs-on: ubuntu-22.04
+    env:
+      # The cloned repo will be placed into $GITHUB_WORKSPACE/kernel_common
+      KERNEL_REPO_OWNER: MrPankaj24
+      KERNEL_REPO_NAME: kernel_common_modifications
+      KERNEL_CLONE_PATH: ${{ github.workspace }}/kernel_common
+
+      # Build env (adapted from test.sh)
+      DEVICE: m14x
+      ARCH: arm64
+      SUBARCH: arm64
+      CC: "ccache clang-22"
+      HOSTCC: "ccache clang-22"
+      LLVM: "1"
+      LTO: thin
+      LLVM_IAS: "1"
+      TARGET_SOC: s5e8535
+      SOC_NAME: s5e8535
+      DTC_FLAGS: "-@"
+      PLATFORM_VERSION: "15"
+      ANDROID_MAJOR_VERSION: "t"
+      DEPMOD: depmod
+
+      # Workspace mapped paths
+      KERNEL_ROOT: ${{ github.workspace }}/kernel_common
+      OUTDIR: ${{ github.workspace }}/kernel_common/out
+      MODULES_OUTDIR: ${{ github.workspace }}/kernel_common/modules_out
+      FINAL_STAGING: ${{ github.workspace }}/kernel_common/staging
+      IN_DLKM: ${{ github.workspace }}/kernel_common/backups/modules
+
+      # Cross/clang settings
+      CROSS_COMPILE: aarch64-linux-gnu-
+      PATH: /usr/lib/llvm-22/bin:${PATH}
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_MAXSIZE: 5G
+
     steps:
-      - name: Setup Build Environment
+      - name: Checkout this repository (SM-M146B-Kernel-custom)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout kernel_common_modifications into kernel_common/
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO_OWNER }}/${{ env.KERNEL_REPO_NAME }}
+          path: kernel_common
+          # Use GITHUB_TOKEN if the repo is public or this workflow has access.
+          # If private, set a Personal Access Token in the repository secrets named
+          # KERNEL_COMMON_PAT and replace the line below with: token: ${{ secrets.KERNEL_COMMON_PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup apt repo for LLVM 22 and install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev repo zip curl python3
-          mkdir -p $GITHUB_WORKSPACE/kernel_workspace
-          echo "KERNEL_ROOT=$GITHUB_WORKSPACE/kernel_workspace" >> $GITHUB_ENV
+          set -euo pipefail
+          sudo apt-get update -y
+          # Add LLVM apt repo for clang-22
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            clang-22 llvm-22 lld-22 \
+            build-essential make bc libncurses-dev bison flex \
+            python3 python3-distutils git ccache rsync \
+            libssl-dev libelf-dev dwarves device-tree-compiler \
+            file gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu sudo
+          # Prepare ccache
+          mkdir -p "${CCACHE_DIR}"
+          ccache -M "${CCACHE_MAXSIZE}" || true
+          # Ensure clang-22 symlink exists for convenience
+          sudo ln -sf /usr/bin/clang-22 /usr/bin/clang || true
+          sudo ln -sf /usr/bin/clang++-22 /usr/bin/clang++ || true
 
-      - name: Sync GKI Android 13 5.15 LTS Source
-        working-directory: ${{ env.KERNEL_ROOT }}
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-ccache-${{ hashFiles('**/.github/workflows/build-kernel.yml') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Cache kernel out & modules_out
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.OUTDIR }}
+            ${{ env.MODULES_OUTDIR }}
+          key: ${{ runner.os }}-kernel-out-${{ hashFiles('kernel_common/**') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-out-
+
+      - name: Prepare workspace directories & placeholder modules.load
         run: |
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.15-lts --depth=1
-          repo sync -j$(nproc) --force-sync
+          set -euo pipefail
+          mkdir -p "${OUTDIR}"
+          mkdir -p "${MODULES_OUTDIR}"
+          mkdir -p "${FINAL_STAGING}/lib/modules/0.0"
+          mkdir -p "${IN_DLKM}"
+          # create placeholder modules.load if not present
+          if [ ! -f "${IN_DLKM}/modules.load" ]; then
+            echo "# placeholder modules.load" > "${IN_DLKM}/modules.load"
+          fi
 
-      - name: Inject Samsung Source & Apply Fixes
-        working-directory: ${{ env.KERNEL_ROOT }}
+      - name: Print versions and env
         run: |
-          echo "=> Cloning SM-M146B Source..."
-          git clone https://github.com/MrPankaj24/SM-M146B-Kernel-Source.git --depth=1 samsung_src
-          
-          echo "=> Porting USB Drivers..."
-          rm -rf common/drivers/usb/dwc3
-          cp -r samsung_src/drivers/usb/dwc3 common/drivers/usb/
-          cp -r samsung_src/drivers/usb/gadget/function/* common/drivers/usb/gadget/function/
-          cp -r samsung_src/drivers/usb/host/* common/drivers/usb/host/ || true
-          
-          echo "=> Porting Essential SoC Headers..."
-          mkdir -p common/include/soc/samsung
-          cp -r samsung_src/include/soc/samsung/* common/include/soc/samsung/ || true
-          mkdir -p common/include/dt-bindings/soc/samsung
-          cp -r samsung_src/include/dt-bindings/soc/samsung/* common/include/dt-bindings/soc/samsung/ || true
-          
-          echo "=> CREATING SAMSUNG STUBS (For Global Linker Symbols)..."
-          cat <<EOF > common/drivers/usb/host/samsung_stubs.c
-          #include <linux/kernel.h>
-          #include <linux/device.h>
-          
-          // Dummy struct definitions
-          struct wake_lock { int dummy; };
-          struct xhci_exynos_audio { int dummy; };
-          
-          // Function Stubs
-          int xhci_exynos_audio_alloc(struct device *dev) { return 0; }
-          int xhci_exynos_sync_dev_ctx(void *xhci, int slot_id) { return 0; }
-          int usb_user_scenario(void) { return 0; }
-          int is_otg_only(void) { return 0; }
-          void usb_power_notify_control(void) {}
-          int otg_is_connect(void) { return 0; }
-          void exynos_usbdrd_phy_vendor_set(void) {}
-          
-          // Global Variable Stubs (Exported)
-          struct wake_lock main_hcd_wakelock;
-          struct wake_lock shared_hcd_wakelock;
-          int xhci_exynos_pm_state = 0;
-          int usb_dr_role_control = 0;
-          
-          // Export symbols to ensure visibility
-          EXPORT_SYMBOL(xhci_exynos_audio_alloc);
-          EXPORT_SYMBOL(xhci_exynos_sync_dev_ctx);
-          EOF
+          set -euo pipefail
+          echo "KERNEL_ROOT=${KERNEL_ROOT}"
+          echo "OUTDIR=${OUTDIR}"
+          echo "MODULES_OUTDIR=${MODULES_OUTDIR}"
+          clang-22 --version || true
+          aarch64-linux-gnu-gcc --version || true
+          lld-22 --version || true
+          ccache --version || true
 
-          echo "=> RUNNING PYTHON SURGEON..."
-          cat <<EOF > patcher.py
-          import os
-          import re
-
-          # Fix 1: core.c declaration
-          core_c = 'common/drivers/usb/dwc3/core.c'
-          if os.path.exists(core_c):
-              with open(core_c, 'r') as f: lines = f.readlines()
-              if 'extern int xhci_exynos_audio_alloc' not in lines[0]:
-                  lines.insert(0, 'struct device;\nextern int xhci_exynos_audio_alloc(struct device *dev);\n')
-                  with open(core_c, 'w') as f: f.writelines(lines)
-                  print("Patched core.c")
-
-          # Fix 2: xhci.c declaration
-          xhci_c = 'common/drivers/usb/host/xhci.c'
-          if os.path.exists(xhci_c):
-              with open(xhci_c, 'r') as f: lines = f.readlines()
-              if 'extern int xhci_exynos_sync_dev_ctx' not in lines[0]:
-                  lines.insert(0, 'struct xhci_hcd;\nextern int xhci_exynos_sync_dev_ctx(struct xhci_hcd *xhci, int slot_id);\n')
-                  with open(xhci_c, 'w') as f: f.writelines(lines)
-                  print("Patched xhci.c")
-
-          # Fix 3: xhci-hub.c struct definition AND Global Variable Injection
-          hub_c = 'common/drivers/usb/host/xhci-hub.c'
-          # We inject the struct AND the variable definition right here to guarantee visibility
-          struct_def = 'struct xhci_exynos_audio { struct device *dev; struct phy *phy; void *regs; };\nstruct xhci_exynos_audio dummy_audio;\nstruct xhci_exynos_audio *g_xhci_exynos_audio = &dummy_audio;\n'
-          if os.path.exists(hub_c):
-              with open(hub_c, 'r') as f: lines = f.readlines()
-              if 'struct xhci_exynos_audio {' not in lines[0]:
-                  # Remove existing extern declaration to avoid conflicts
-                  lines = [line for line in lines if 'extern struct xhci_exynos_audio *g_xhci_exynos_audio' not in line]
-                  lines.insert(0, struct_def)
-                  with open(hub_c, 'w') as f: f.writelines(lines)
-                  print("Patched xhci-hub.c with embedded global variable")
-          
-          # Fix 4: xhci-mem.c macro
-          mem_c = 'common/drivers/usb/host/xhci-mem.c'
-          macro_def = '#ifndef XHCI_USE_URAM_FOR_EXYNOS_AUDIO\n#define XHCI_USE_URAM_FOR_EXYNOS_AUDIO 0\n#endif\n'
-          if os.path.exists(mem_c):
-              with open(mem_c, 'r') as f: lines = f.readlines()
-              if 'XHCI_USE_URAM_FOR_EXYNOS_AUDIO' not in lines[0]:
-                  lines.insert(0, macro_def)
-                  with open(mem_c, 'w') as f: f.writelines(lines)
-                  print("Patched xhci-mem.c")
-
-          # Fix 5: u_ether.c unused function (Regex)
-          ether_c = 'common/drivers/usb/gadget/function/u_ether.c'
-          if os.path.exists(ether_c):
-              with open(ether_c, 'r') as f: content = f.read()
-              pattern = r'static\s+enum\s+hrtimer_restart\s+tx_timeout\s*\(\s*struct\s+hrtimer\s*\*\s*data\s*\)'
-              replacement = 'static enum hrtimer_restart __maybe_unused tx_timeout(struct hrtimer *data)'
-              new_content = re.sub(pattern, replacement, content)
-              with open(ether_c, 'w') as f: f.write(new_content)
-              print("Patched u_ether.c")
-          EOF
-          
-          python3 patcher.py
-          
-          echo "=> Forcing Stubs Compilation..."
-          echo "obj-y += samsung_stubs.o" >> common/drivers/usb/host/Makefile
-          
-          echo "=> Applying Module Check Bypass..."
-          sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' common/kernel/module.c || true
-
-          echo "=> Destroying Defconfig Checkers..."
-          find common -name "build.config.*" -exec sed -i 's/check_defconfig//g' {} +
-          find common -name "build.config.*" -exec sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/g' {} +
-
-      - name: Configure Kernel Features
-        working-directory: ${{ env.KERNEL_ROOT }}/common
+      - name: Kernel: Generate config (DEVICE_defconfig + fragments)
         run: |
-          echo "=> Appending custom configs to gki_defconfig..."
-          cat >> arch/arm64/configs/gki_defconfig << 'EOF'
-          
-          # --- EXYNOS & USB ---
-          CONFIG_ARCH_EXYNOS=y
-          CONFIG_USB_DWC3_EXYNOS=y
-          CONFIG_USB_F_RNDIS=y
-          CONFIG_USB_CONFIGFS_F_TETHER=y
-          CONFIG_USB_DWC3_DUAL_ROLE=y
-          CONFIG_USB_XHCI_EXYNOS=y
-          CONFIG_SND=y
-          CONFIG_SND_USB=y
-          CONFIG_SND_USB_AUDIO=y
-          
-          # --- DISABLE BROKEN HID ---
-          CONFIG_USB_CONFIGFS_F_HID=n
-          
-          # --- KSU & SUSFS ---
-          CONFIG_KSU=y
-          CONFIG_KSU_SUSFS=y
-          CONFIG_WIREGUARD=y
-          EOF
-          
-          echo "=> Disabling WERROR safely..."
-          sed -i 's/CONFIG_WERROR=y/CONFIG_WERROR=n/' arch/arm64/configs/gki_defconfig || true
+          set -euo pipefail
+          export O="${OUTDIR}"
+          export ARCH=${ARCH}
+          export SUBARCH=${SUBARCH}
+          export CROSS_COMPILE=${CROSS_COMPILE}
+          export PATH=/usr/lib/llvm-22/bin:$PATH
+          export CC="${CC}"
+          export HOSTCC="${HOSTCC}"
+          # Run config generation inside the cloned kernel_common directory:
+          (cd "${KERNEL_ROOT}" && make -j$(nproc) O="${O}" ${DEVICE}_defconfig su.config) 2>&1 | tee build_generate_config.log
 
-      - name: Compile Kernel (Bazel)
-        working-directory: ${{ env.KERNEL_ROOT }}
-        run: |          
-          echo "=> Starting Final Bazel Build..."
-          tools/bazel build --config=fast //common:kernel_aarch64_dist
-
-      - name: Package AnyKernel3
+      - name: Kernel: prepare (minimal)
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git
-          cp ${{ env.KERNEL_ROOT }}/bazel-bin/common/kernel_aarch64/Image AnyKernel3/ || true
-          cd AnyKernel3
-          zip -r9 ../M146B-Kernel-Complete.zip * -x .git*
+          set -euo pipefail
+          export O="${OUTDIR}"
+          export ARCH=${ARCH}
+          export SUBARCH=${SUBARCH}
+          export CROSS_COMPILE=${CROSS_COMPILE}
+          export PATH=/usr/lib/llvm-22/bin:$PATH
+          export CC="${CC}" HOSTCC="${HOSTCC}"
+          (cd "${KERNEL_ROOT}" && make -j4 prepare O="${O}") 2>&1 | tee -a build_generate_config.log
 
-      - name: Upload Flashable Artifact
+      - name: Kernel: build (full)
+        run: |
+          set -euo pipefail
+          export O="${OUTDIR}"
+          export ARCH=${ARCH}
+          export SUBARCH=${SUBARCH}
+          export CROSS_COMPILE=${CROSS_COMPILE}
+          export PATH=/usr/lib/llvm-22/bin:$PATH
+          export CC="${CC}" HOSTCC="${HOSTCC}"
+          export LD=ld.lld
+          (cd "${KERNEL_ROOT}" && make -j$(nproc) O="${O}") 2>&1 | tee build.log
+
+      - name: Install and strip modules to modules_out
+        run: |
+          set -euo pipefail
+          export O="${OUTDIR}"
+          export MODULES_OUTDIR="${MODULES_OUTDIR}"
+          export CROSS_COMPILE=${CROSS_COMPILE}
+          export PATH=/usr/lib/llvm-22/bin:$PATH
+          export CC="${CC}" HOSTCC="${HOSTCC}"
+          (cd "${KERNEL_ROOT}" && make -j$(nproc) O="${O}" \
+            INSTALL_MOD_STRIP="--strip-debug --keep-section=.ARM.attributes" \
+            INSTALL_MOD_PATH="${MODULES_OUTDIR}" \
+            modules_install) 2>&1 | tee -a build.log || true
+
+      - name: Copy metadata for depmod into staging
+        run: |
+          set -euo pipefail
+          mkdir -p "${FINAL_STAGING}/lib/modules/0.0"
+          for f in modules.builtin modules.order; do
+            src=$(find "${MODULES_OUTDIR}/lib/modules" -type f -name "$f" | head -n1 || true)
+            if [ -n "$src" ]; then
+              cp "$src" "${FINAL_STAGING}/lib/modules/0.0/$f"
+            else
+              echo "warning: $f not found under ${MODULES_OUTDIR}/lib/modules" | tee -a build.log
+            fi
+          done
+          if [ -f "${IN_DLKM}/modules.load" ]; then
+            cp "${IN_DLKM}/modules.load" "${FINAL_STAGING}/lib/modules/0.0/modules.load"
+          fi
+
+      - name: Optional: Generate modules.dep with depmod (non-fatal)
+        run: |
+          set -euo pipefail
+          if [ -f "${OUTDIR}/System.map" ]; then
+            echo "Running depmod into staging..." | tee -a build.log
+            sudo ${DEPMOD} -b "${FINAL_STAGING}" -F "${OUTDIR}/System.map" 0.0 2>&1 | tee -a build.log || true
+          else
+            echo "System.map not found; skipping depmod" | tee -a build.log
+          fi
+
+      - name: Copy kernel Image and System.map to workspace
+        run: |
+          set -euo pipefail
+          if [ -f "${OUTDIR}/arch/arm64/boot/Image" ]; then
+            cp "${OUTDIR}/arch/arm64/boot/Image" "${GITHUB_WORKSPACE}/Image"
+            echo "Kernel image copied to ${GITHUB_WORKSPACE}/Image" | tee -a build.log
+          else
+            echo "WARNING: Image not found at ${OUTDIR}/arch/arm64/boot/Image" | tee -a build.log
+            ls -la "${OUTDIR}/arch/arm64/boot" || true
+          fi
+          if [ -f "${OUTDIR}/System.map" ]; then
+            cp "${OUTDIR}/System.map" "${GITHUB_WORKSPACE}/System.map"
+          fi
+
+      - name: Verify modules listed in modules.load are present (like test.sh check)
+        run: |
+          set -euo pipefail
+          missing_modules=""
+          while read -r module; do
+            [ -z "$module" ] && continue
+            found=$(find "${MODULES_OUTDIR}/lib/modules" -name "$module" -type f | head -n1 || true)
+            if [ -f "$found" ]; then
+              echo "FOUND: $module -> $found"
+            else
+              missing_modules="${missing_modules} $module"
+            fi
+          done < "${IN_DLKM}/modules.load"
+          if [ -n "$missing_modules" ]; then
+            echo "WARNING: The following modules from modules.load were not found:$missing_modules" | tee -a build.log
+          fi
+
+      - name: Package artifacts (Image, System.map, modules_out, staging, logs)
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          if [ -f "${GITHUB_WORKSPACE}/Image" ]; then
+            cp "${GITHUB_WORKSPACE}/Image" artifacts/Image
+          fi
+          if [ -f "${GITHUB_WORKSPACE}/System.map" ]; then
+            cp "${GITHUB_WORKSPACE}/System.map" artifacts/System.map
+          fi
+          if [ -d "${MODULES_OUTDIR}/lib" ]; then
+            tar -C "${MODULES_OUTDIR}" -czf artifacts/modules_out.tgz lib
+          fi
+          if [ -d "${FINAL_STAGING}" ]; then
+            tar -C "${FINAL_STAGING}" -czf artifacts/staging.tgz .
+          fi
+          cp build.log artifacts/build.log || true
+          cp build_generate_config.log artifacts/build_generate_config.log || true
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: M146B-Kernel-Complete
-          path: M146B-Kernel-Complete.zip
+          name: kernel-build-artifacts
+          path: artifacts
